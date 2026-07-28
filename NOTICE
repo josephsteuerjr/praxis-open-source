@@ -1,0 +1,13 @@
+# Third-Party Notices
+
+Praxis consists of components under distinct licenses:
+
+- Files under `relay/` are Relay, licensed under the MIT License. The complete
+  license and copyright notice are in `relay/LICENSE`.
+- Files outside `relay/` are Praxis, licensed under GNU Affero General Public
+  License version 3. The project notice is in `LICENSE`, and the complete terms
+  are in `LICENSE-AGPL-3.0.txt`.
+
+The presence of both components in one repository does not replace either
+component's license notice. Preserve `relay/LICENSE` when redistributing Relay
+or substantial portions of it.

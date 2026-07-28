@@ -16,7 +16,16 @@ commit прошёл gate и как откатываться, фиксирует 
 - [`STATUS.md`](STATUS.md) — единственная оперативная правда о live/candidate, проверках и rollback;
 - [`VISION.md`](VISION.md) — направление продукта, без журнала релизов;
 - [`AGENTS.md`](AGENTS.md) — опасные операции и правила работы с этим репозиторием;
-- [`body/README.md`](body/README.md) — сборка, установка и диагностика Windows Body.
+- [`body/README.md`](body/README.md) — сборка, установка и диагностика Windows Body;
+- [`relay/README.md`](relay/README.md) — импортированный Relay и его отдельная MIT-лицензия.
+
+## Лицензии
+
+Praxis вне каталога `relay/` распространяется по GNU AGPLv3; краткое уведомление находится в
+[`LICENSE`](LICENSE), полный текст — в [`LICENSE-AGPL-3.0.txt`](LICENSE-AGPL-3.0.txt).
+Импортированный компонент [`relay/`](relay/) распространяется отдельно по MIT License; его условия
+и provenance снимка находятся в [`relay/LICENSE`](relay/LICENSE) и [`relay/README.md`](relay/README.md).
+Сводный лицензионный шов зафиксирован в [`NOTICE`](NOTICE).
 
 ## Главные границы
 

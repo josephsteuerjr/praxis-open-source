@@ -80,6 +80,10 @@ body/state/
 body/body.json
 body/service-body.json
 body/system-router.json
+relay/target/
+relay/logs/
+relay/*.log
+relay/src.bak-*/
 bin/
 .build/
 

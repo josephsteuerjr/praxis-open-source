@@ -1,0 +1,10 @@
+# Rust build artifacts
+target/
+
+# Accidental manual backup from 06.07 (differs from live only in core/{chat_completions,models}.rs).
+# Kept on disk on purpose (rollback source); Егор decides whether to delete it, not this repo.
+src.bak-toolfix/
+
+# Editor/backup junk
+*.rs.bk
+*.log
