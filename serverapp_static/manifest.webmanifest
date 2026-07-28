@@ -1,0 +1,21 @@
+{
+  "id": "/",
+  "name": "ATLAS Observatory",
+  "short_name": "ATLAS",
+  "description": "Серверная обсерватория: живая телеметрия хоста, контейнеры, топология сети, изоляция и доступ.",
+  "lang": "ru",
+  "dir": "ltr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#07090d",
+  "theme_color": "#07090d",
+  "categories": ["developer", "productivity", "utilities"],
+  "icons": [
+    { "src": "/s/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/s/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/s/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

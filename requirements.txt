@@ -1,0 +1,27 @@
+anthropic>=0.39
+openai>=1.40
+python-dotenv>=1.0
+cryptography>=43,<49
+aiogram>=3.4
+# пин, не >=: невинный ребилд образа однажды молча привёз 1.44 со сменой семантики client.loop
+# (динамический get_running_loop -> мёртвый луп из воркер-тредов, все sync-тулы таймаутили)
+telethon==1.44.0
+# Мультимодальный Telegram: локальный STT; neural female TTS + локальный Piper fallback.
+faster-whisper==1.2.1
+piper-tts==1.4.2
+edge-tts==7.2.8
+# JPEG-вид скринов для модели (перекодировка observe в agent.py; мягкий фолбэк без него)
+pillow>=10
+# Веб-руки v2 (webtool.py): главный контент без меню/шапок (trafilatura, тянет lxml),
+# кодировки легаси-рунета (charset-normalizer), PDF-чтение (pypdf), brotli-сжатие CDN.
+# Все четыре ОПЦИОНАЛЬНЫ в коде — webtool деградирует на регэкспы, если их нет.
+trafilatura>=1.12
+charset-normalizer>=3.3
+pypdf>=4.3
+brotli>=1.1
+# Картинка ИЗ ДАННЫХ — график своей же жизни, схема, SVG→PNG. Рисует она сама, своим
+# shell'ом; отдельного тула нет. Системную половину (libcairo2, chromium, шрифты)
+# ставит Dockerfile. Локальной генерации моделью здесь быть не может: GPU нет,
+# 4 ядра, 7 ГБ памяти на всю коробку.
+matplotlib>=3.8
+cairosvg>=2.7

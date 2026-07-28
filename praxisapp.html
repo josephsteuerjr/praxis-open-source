@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#080b12">
+  <!-- Telegram WebApp SDK: даёт стабильный window.Telegram.WebApp.initData, переживающий
+       перезагрузку вебвью (без него initData был только во фрагменте URL, который срезался
+       на первом рендере -> «нужна авторизация» на любом reload). CSP уже пускает telegram.org. -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <title>Praxis</title>
+  <link rel="manifest" href="/app/static/manifest.webmanifest">
+  <link rel="icon" href="/app/static/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/app/static/icon-192.png">
+  <link rel="stylesheet" href="/app/static/app.css?v=31">
+</head>
+<body>
+  <canvas id="ambient" aria-hidden="true"></canvas>
+  <div class="aurora" aria-hidden="true">
+    <span class="aurora__field aurora__field--violet"></span>
+    <span class="aurora__field aurora__field--cyan"></span>
+    <span class="aurora__field aurora__field--gold"></span>
+    <span class="aurora__noise"></span>
+  </div>
+
+  <svg class="icon-sprite" aria-hidden="true" focusable="false">
+    <symbol id="i-praxis" viewBox="0 0 24 24"><path d="M12 2.5a9.5 9.5 0 1 0 9.5 9.5A9.5 9.5 0 0 0 12 2.5Z"/><path d="M12 6.4a5.6 5.6 0 1 0 5.6 5.6A5.6 5.6 0 0 0 12 6.4Z"/><circle cx="12" cy="12" r="1.65"/></symbol>
+    <symbol id="i-now" viewBox="0 0 24 24"><path d="M4 13.2h3.3l2.1-6.4 4 11.1 2.1-6H20"/></symbol>
+    <symbol id="i-runs" viewBox="0 0 24 24"><path d="M8 5.2 17.2 12 8 18.8Z"/><path d="M4 4v16"/></symbol>
+    <symbol id="i-computer" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2.2"/><path d="M8 21h8M12 17v4"/></symbol>
+    <symbol id="i-memory" viewBox="0 0 24 24"><path d="M8 4.3A3.4 3.4 0 0 0 4.6 7.7v8.6A3.4 3.4 0 0 0 8 19.7h8a3.4 3.4 0 0 0 3.4-3.4V7.7A3.4 3.4 0 0 0 16 4.3Z"/><path d="M8.2 9.1h7.6M8.2 12h7.6M8.2 14.9h4.5"/></symbol>
+    <symbol id="i-telegram" viewBox="0 0 24 24"><path d="m3.2 11.2 16.6-6.4-3 14.4-5.1-3.8-3.1 2.9.4-5.1 8.4-5.4-10.3 4.3Z"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></symbol>
+    <symbol id="i-trust" viewBox="0 0 24 24"><path d="M12 2.8 20 6v5.5c0 4.8-3.2 8.1-8 9.7-4.8-1.6-8-4.9-8-9.7V6Z"/><path d="m8.4 12.1 2.3 2.3 5-5"/></symbol>
+    <symbol id="i-system" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.7v2.1M12 19.2v2.1M21.3 12h-2.1M4.8 12H2.7M18.6 5.4l-1.5 1.5M6.9 17.1l-1.5 1.5M18.6 18.6l-1.5-1.5M6.9 6.9 5.4 5.4"/></symbol>
+    <symbol id="i-artifact" viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7Z"/><path d="M14 3v5h5M9.5 13h5M9.5 16.5h5"/></symbol>
+    <symbol id="i-process" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M12 15h5"/></symbol>
+    <symbol id="i-map" viewBox="0 0 24 24"><path d="m3.5 6.5 5-2.5 7 2.5 5-2.5v13.5l-5 2.5-7-2.5-5 2.5Z"/><path d="M8.5 4v13.5M15.5 6.5V20"/></symbol>
+    <symbol id="i-followup" viewBox="0 0 24 24"><path d="M4 5.5h16v11H9l-5 4Z"/><path d="M8 9.2h8M8 12.7h5"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19 8a8 8 0 1 0 .4 7M19 4v4h-4"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 10 7-10 7Z"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></symbol>
+    <symbol id="i-warning" viewBox="0 0 24 24"><path d="m12 3 10 18H2Z"/><path d="M12 9v5M12 17.5v.1"/></symbol>
+  </svg>
+
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <button id="backButton" class="icon-button topbar__back" type="button" aria-label="Назад" hidden>
+        <svg class="icon"><use href="#i-back"></use></svg>
+      </button>
+      <div class="brand" aria-label="Praxis">
+        <span id="brandPulse" class="brand__sigil"><svg class="icon"><use href="#i-praxis"></use></svg></span>
+        <span class="brand__copy"><strong>Praxis</strong><small id="brandState">соединяюсь</small></span>
+      </div>
+      <div class="topbar__actions">
+        <span id="syncState" class="sync-state" role="status" aria-live="polite"><i></i><span>синхронизация</span></span>
+        <button id="refreshButton" class="icon-button" type="button" aria-label="Обновить">
+          <svg class="icon"><use href="#i-refresh"></use></svg>
+        </button>
+      </div>
+    </header>
+
+    <div id="staleNotice" class="stale-notice glass" role="status" aria-live="polite" hidden>
+      <svg class="icon" aria-hidden="true"><use href="#i-warning"></use></svg>
+      <span><strong>Офлайн-снимок</strong><small id="staleTime">Последнее подтверждённое состояние</small></span>
+    </div>
+
+    <main id="main" class="main" tabindex="-1">
+      <section id="view-now" class="view view--active" data-view="now" aria-labelledby="title-now">
+        <h1 id="title-now" class="sr-only">Сейчас</h1>
+        <article id="heroCard" class="hero glass glass--hero tilt" data-tilt>
+          <div class="hero__halo" aria-hidden="true"><i></i><i></i><i></i></div>
+          <div class="hero__content">
+            <div class="eyebrow"><span id="heroDot" class="live-dot"></span><span id="heroEyebrow">Живой контур</span></div>
+            <h2 id="heroTitle">Praxis поднимает состояние</h2>
+            <p id="heroSummary">Сервер остаётся мозгом. Эта поверхность показывает только подтверждённое состояние и след действий.</p>
+            <div class="hero__metrics">
+              <div><strong id="heroRuns">—</strong><span>активных run</span></div>
+              <div><strong id="heroBody">—</strong><span>Windows</span></div>
+              <div><strong id="heroFollowups">—</strong><span>непрочитано</span></div>
+            </div>
+          </div>
+          <div class="hero__revision mono" id="heroRevision">rev —</div>
+        </article>
+
+        <div class="section-heading"><div><span class="eyebrow">Оперативно</span><h2>Что движется сейчас</h2></div></div>
+        <div class="bento" id="overviewBento">
+          <button class="bento-card bento-card--run glass tilt" type="button" data-open="runs" data-tilt>
+            <span class="bento-card__icon accent-violet"><svg class="icon"><use href="#i-runs"></use></svg></span>
+            <span class="bento-card__body"><span class="bento-card__label">Runs</span><strong id="tileRunsTitle">Нет активных</strong><small id="tileRunsSub">durable execution</small></span>
+            <span id="tileRunsBadge" class="badge" hidden></span>
+            <svg class="icon bento-card__arrow"><use href="#i-arrow"></use></svg>
+          </button>
+          <button class="bento-card bento-card--computer glass tilt" type="button" data-open="computer" data-tilt>
+            <span class="bento-card__icon accent-cyan"><svg class="icon"><use href="#i-computer"></use></svg></span>
+            <span class="bento-card__body"><span class="bento-card__label">Компьютер</span><strong id="tileComputerTitle">Проверяю тело</strong><small id="tileComputerSub">device evidence</small></span>
+            <span id="tileComputerSignal" class="signal-bars" aria-hidden="true"><i></i><i></i><i></i></span>
+          </button>
+          <button class="bento-card bento-card--memory glass tilt" type="button" data-open="memory" data-tilt>
+            <span class="bento-card__icon accent-gold"><svg class="icon"><use href="#i-memory"></use></svg></span>
+            <span class="bento-card__body"><span class="bento-card__label">Память</span><strong id="tileMemoryTitle">Карты</strong><small id="tileMemorySub">provenance · FTS</small></span>
+            <svg class="icon bento-card__arrow"><use href="#i-arrow"></use></svg>
+          </button>
+          <button class="bento-card bento-card--telegram glass tilt" type="button" data-open="telegram" data-tilt>
+            <span class="bento-card__icon accent-blue"><svg class="icon"><use href="#i-telegram"></use></svg></span>
+            <span class="bento-card__body"><span class="bento-card__label">Telegram</span><strong id="tileTelegramTitle">Нити</strong><small id="tileTelegramSub">rooms · follow-ups</small></span>
+            <span id="tileTelegramBadge" class="badge" hidden></span>
+          </button>
+          <button class="bento-card bento-card--system glass tilt" type="button" data-open="more" data-tilt>
+            <span class="bento-card__icon accent-green"><svg class="icon"><use href="#i-system"></use></svg></span>
+            <span class="bento-card__body"><span class="bento-card__label">Контур</span><strong id="tileSystemTitle">Система</strong><small id="tileSystemSub">доверие · сервисы</small></span>
+            <svg class="icon bento-card__arrow"><use href="#i-arrow"></use></svg>
+          </button>
+        </div>
+
+        <section class="feed-section" aria-labelledby="signalTitle">
+          <div class="section-heading"><div><span class="eyebrow">Durable delivery</span><h2 id="signalTitle">Входящие от Praxis</h2></div><span id="snapshotAge" class="quiet-label">—</span></div>
+          <div id="signalFeed" class="signal-feed glass" aria-live="polite"></div>
+        </section>
+      </section>
+
+      <section id="view-runs" class="view" data-view="runs" aria-labelledby="title-runs">
+        <div class="view-heading"><div><span class="eyebrow">Durable execution</span><h1 id="title-runs">Runs</h1><p>Контекст, инструменты, результаты и recap в одной проверяемой линии.</p></div><button class="icon-button glass" type="button" data-action="refresh" aria-label="Обновить runs"><svg class="icon"><use href="#i-refresh"></use></svg></button></div>
+        <div id="runFilters" class="segmented" role="group" aria-label="Фильтр runs">
+          <button class="segmented__button is-active" type="button" data-run-filter="all">Все</button>
+          <button class="segmented__button" type="button" data-run-filter="active">Активные</button>
+          <button class="segmented__button" type="button" data-run-filter="attention">Внимание</button>
+          <button class="segmented__button" type="button" data-run-filter="done">Готовые</button>
+        </div>
+        <div id="runsList" class="stack-list" aria-live="polite"></div>
+      </section>
+
+      <section id="view-computer" class="view" data-view="computer" aria-labelledby="title-computer">
+        <div class="view-heading"><div><span class="eyebrow">Execution body</span><h1 id="title-computer">Компьютер</h1><p>Файлы, процессы и приложения с точным execution context.</p></div><button class="icon-button glass" type="button" data-command="inventory.refresh" aria-label="Обновить карту компьютера"><svg class="icon"><use href="#i-refresh"></use></svg></button></div>
+        <div id="deviceHero" class="device-hero glass"></div>
+        <div class="quick-grid" aria-label="Действия с компьютером">
+          <button class="quick-action glass" type="button" data-command="files.open"><svg class="icon"><use href="#i-artifact"></use></svg><span><strong>Файлы</strong><small>получить · отправить</small></span></button>
+          <button class="quick-action glass" type="button" data-command="process.start"><svg class="icon"><use href="#i-process"></use></svg><span><strong>Команда</strong><small>запустить с логом</small></span></button>
+          <button class="quick-action glass" type="button" data-command="desktop.capture"><svg class="icon"><use href="#i-computer"></use></svg><span><strong>Снимок</strong><small>interactive desktop</small></span></button>
+          <button class="quick-action glass" type="button" data-command="inventory.refresh"><svg class="icon"><use href="#i-map"></use></svg><span><strong>Inventory</strong><small>карта машины</small></span></button>
+        </div>
+        <div class="split-heading"><h2>Процессы</h2><span id="processCount" class="quiet-label">—</span></div>
+        <div id="processList" class="stack-list"></div>
+        <div class="split-heading"><h2>Артефакты и evidence</h2><span id="artifactCount" class="quiet-label">—</span></div>
+        <div id="artifactList" class="stack-list"></div>
+      </section>
+
+      <section id="view-memory" class="view" data-view="memory" aria-labelledby="title-memory">
+        <div class="view-heading"><div><span class="eyebrow">Navigation, not myth</span><h1 id="title-memory">Память</h1><p>Канон остаётся в Markdown и JSONL. Карты и SQL — пересобираемая навигация.</p></div></div>
+        <form id="memorySearch" class="search-box glass" role="search">
+          <svg class="icon"><use href="#i-search"></use></svg>
+          <input id="memoryQuery" name="query" type="search" placeholder="Найти факт, проект, run…" autocomplete="off" aria-label="Поиск по памяти">
+          <button class="search-box__submit" type="submit">Найти</button>
+        </form>
+        <div id="memoryHealth" class="memory-health glass"></div>
+        <div class="split-heading"><h2>Карты</h2><button class="text-button" type="button" data-command="memory.rebuild">Пересобрать индекс</button></div>
+        <div id="memoryMaps" class="map-grid"></div>
+        <div id="memoryResults" class="stack-list" hidden></div>
+      </section>
+
+      <section id="view-telegram" class="view" data-view="telegram" aria-labelledby="title-telegram">
+        <div class="view-heading"><div><span class="eyebrow">Social field</span><h1 id="title-telegram">Telegram</h1><p>Комнаты, топики, ответы и членство без второго клиента Telethon.</p></div></div>
+        <div id="socialPulse" class="social-pulse glass"></div>
+        <div class="split-heading"><h2>Ожидания и ответы</h2><span id="followupCount" class="quiet-label">—</span></div>
+        <div id="followupList" class="stack-list"></div>
+        <div class="split-heading"><h2>Комнаты</h2><button id="joinRoomButton" class="text-button" type="button">Войти по ссылке</button></div>
+        <div id="roomList" class="stack-list"></div>
+        <div class="split-heading"><h2>Транзакции членства</h2></div>
+        <div id="membershipList" class="stack-list"></div>
+      </section>
+
+      <section id="view-more" class="view" data-view="more" aria-labelledby="title-more">
+        <div class="view-heading"><div><span class="eyebrow">Authority & runtime</span><h1 id="title-more">Доверие и система</h1><p>Владелец задаёт человеческий доступ. Praxis сохраняет собственные руки.</p></div></div>
+        <section id="trustSection" class="domain-section" aria-labelledby="trustTitle">
+          <div class="split-heading"><h2 id="trustTitle">Доступ</h2><button id="grantButton" class="text-button" type="button"><svg class="icon"><use href="#i-plus"></use></svg> Добавить</button></div>
+          <div id="trustSummary" class="trust-summary glass"></div>
+          <div id="grantList" class="stack-list"></div>
+          <div class="split-heading device-heading"><h2>Устройства</h2><span class="heading-actions"><button id="newDeviceButton" class="text-button" type="button" hidden>Новая ссылка</button><button id="enrollButton" class="text-button" type="button" hidden>Привязать</button><button id="installButton" class="text-button" type="button" hidden>Установить Praxis</button></span></div>
+          <div id="deviceSummary" class="trust-summary glass"></div>
+          <div id="deviceList" class="stack-list"></div>
+        </section>
+        <section class="domain-section" aria-labelledby="systemTitle">
+          <div class="split-heading"><h2 id="systemTitle">Сервисы</h2><span id="systemHead" class="mono quiet-label">HEAD —</span></div>
+          <div id="serviceList" class="stack-list"></div>
+          <div class="system-actions glass">
+            <button type="button" data-command="system.restart"><svg class="icon"><use href="#i-refresh"></use></svg><span><strong>Мягкий рестарт</strong><small>с durable recovery</small></span></button>
+            <button type="button" data-command="system.logs"><svg class="icon"><use href="#i-process"></use></svg><span><strong>Логи</strong><small>последние receipts</small></span></button>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <nav class="dock glass" aria-label="Основная навигация">
+      <button class="dock__item is-active" type="button" data-nav="now" aria-current="page"><svg class="icon"><use href="#i-now"></use></svg><span>Сейчас</span><i id="navNowBadge" class="nav-badge" hidden></i></button>
+      <button class="dock__item" type="button" data-nav="runs"><svg class="icon"><use href="#i-runs"></use></svg><span>Runs</span><i id="navRunsBadge" class="nav-badge" hidden></i></button>
+      <button class="dock__item" type="button" data-nav="computer"><svg class="icon"><use href="#i-computer"></use></svg><span>Компьютер</span></button>
+      <button class="dock__item" type="button" data-nav="memory"><svg class="icon"><use href="#i-memory"></use></svg><span>Память</span></button>
+      <button class="dock__item" type="button" data-nav="more"><svg class="icon"><use href="#i-more"></use></svg><span>Ещё</span><i id="navMoreBadge" class="nav-badge" hidden></i></button>
+    </nav>
+  </div>
+
+  <div id="scrim" class="scrim" hidden></div>
+  <section id="sheet" class="sheet glass" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" hidden>
+    <div class="sheet__grip" aria-hidden="true"></div>
+    <header class="sheet__header"><div><span id="sheetEyebrow" class="eyebrow"></span><h2 id="sheetTitle"></h2></div><button id="sheetClose" class="icon-button" type="button" aria-label="Закрыть"><svg class="icon"><use href="#i-close"></use></svg></button></header>
+    <div id="sheetBody" class="sheet__body"></div>
+  </section>
+
+  <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <div id="bootState" class="boot-state" role="status" aria-live="polite">
+    <span class="boot-state__orb"><i></i><i></i><i></i></span>
+    <strong>Подключаю живой контур</strong>
+    <small>Получаю snapshot и проверяю provenance</small>
+  </div>
+
+  <script type="module" src="/app/static/app.js?v=31"></script>
+</body>
+</html>

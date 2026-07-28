@@ -1,0 +1,10 @@
+body.203.0.113.10.nip.io {
+	# The public surface is intentionally limited to the device socket and CAS.
+	@device path /healthz /v1/ws/device/* /v1/artifacts/*
+	handle @device {
+		reverse_proxy 172.17.0.1:9473
+	}
+	handle {
+		respond "not found" 404
+	}
+}

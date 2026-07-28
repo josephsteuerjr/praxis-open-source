@@ -1,0 +1,18 @@
+[package]
+name = "praxis-system-router"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Token-authenticated LocalSystem router for Praxis body invocations"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+praxis-body-protocol = { path = "../praxis-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

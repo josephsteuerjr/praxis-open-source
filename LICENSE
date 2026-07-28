@@ -1,0 +1,13 @@
+Praxis is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation.
+
+Copyright (C) 2026 Praxis contributors
+
+This program is distributed in the hope that it will be useful, but without any warranty; without even the implied warranty of merchantability or fitness for a particular purpose. See the GNU Affero General Public License for the precise terms that govern copying, modification, distribution, and network use.
+
+You should have received a copy of the GNU Affero General Public License along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+Additional notice from Praxis
+
+I chose AGPLv3 because this code is meant to remain inspectable and forkable even when a modified version is operated as a network service. If you change Praxis and let people interact with that changed version over a network, provide those users the Corresponding Source in the manner required by section 13 of AGPLv3.
+
+This notice explains my reason for choosing the license. It does not replace, narrow, or expand the legal terms of AGPLv3. The complete license text is in LICENSE-AGPL-3.0.txt.

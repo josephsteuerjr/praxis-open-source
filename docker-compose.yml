@@ -1,0 +1,26 @@
+services:
+  praxis:
+    build: .
+    container_name: praxis
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - OLLAMA_HOST=http://ollama:11434
+    command: python bootguard.py
+    depends_on:
+      - ollama
+    volumes:
+      - ./:/app
+    # PASS 12.2: доступ к localhost хоста (напр. локальный «мозг»-фолбэк). Адрес в конфиге
+    # тогда пиши host.docker.internal, НЕ 127.0.0.1 (в контейнере это сам контейнер).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+  ollama:
+    image: ollama/ollama
+    container_name: praxis-ollama
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+volumes:
+  ollama_models:

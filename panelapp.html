@@ -1,0 +1,1390 @@
+<!doctype html>
+<!-- Praxis — пульт (PASS 6): плиточный хаб + разделы. Один апп: устройство, пульс, мысли,
+     таски, почта, сервер, параметры. Дизайн: Telegram theme vars, тёмная/светлая сами. -->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Praxis — пульт</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root {
+  --bg: var(--tg-theme-bg-color, #0f1115);
+  --fg: var(--tg-theme-text-color, #e8eaee);
+  --muted: var(--tg-theme-hint-color, #8a919e);
+  --card: var(--tg-theme-secondary-bg-color, #1a1e26);
+  --acc: var(--tg-theme-button-color, #4c8dff);
+  --accfg: var(--tg-theme-button-text-color, #fff);
+  --link: var(--tg-theme-link-color, #6ab0ff);
+  --ok: #3fbf7f; --warn: #e0a03d; --err: #e05d5d;
+  --r: 16px; --r2: 12px;
+  --pad: 14px;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+  font: 15px/1.45 -apple-system, system-ui, Roboto, "Segoe UI", sans-serif;
+  overscroll-behavior: none; }
+body { padding-bottom: env(safe-area-inset-bottom); }
+.mono { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+h1, h2, h3 { margin: 0; font-weight: 700; }
+button { font: inherit; border: 0; cursor: pointer; }
+
+/* ---------- хаб ---------- */
+#home { padding: calc(10px + env(safe-area-inset-top)) var(--pad) 24px; }
+#homehead { display: flex; align-items: center; gap: 10px; padding: 6px 2px 14px; }
+#homehead .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+#homehead .dot.ok { background: var(--ok); box-shadow: 0 0 8px color-mix(in srgb, var(--ok) 60%, transparent); }
+#homehead .dot.err { background: var(--err); }
+#homehead h1 { font-size: 19px; flex: 1; }
+#homehead .commit { font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace;
+  background: var(--card); padding: 4px 8px; border-radius: 8px; }
+#tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.tile { background: var(--card); border-radius: var(--r); padding: 13px 13px 12px; text-align: left;
+  color: var(--fg); display: flex; flex-direction: column; gap: 8px; min-height: 96px;
+  transition: transform .08s ease, filter .15s; position: relative; overflow: hidden; }
+.tile:active { transform: scale(.97); filter: brightness(1.08); }
+.tile .ic { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center;
+  font-size: 18px; background: color-mix(in srgb, var(--acc) 16%, transparent); }
+.tile .nm { font-weight: 650; font-size: 14.5px; }
+.tile .sub { font-size: 11.5px; color: var(--muted); min-height: 15px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile .badge { position: absolute; top: 10px; right: 10px; min-width: 20px; height: 20px;
+  border-radius: 10px; background: var(--acc); color: var(--accfg); font-size: 11px; font-weight: 700;
+  display: none; place-items: center; padding: 0 6px; }
+.tile .badge.on { display: grid; }
+.diffline { display: block; white-space: pre-wrap; word-break: break-all; }
+.diffadd { color: #4cd97b; } .diffdel { color: #ff7a7a; } .diffmeta { color: var(--muted); }
+.tile.wide { grid-column: 1 / -1; min-height: 72px; flex-direction: row; align-items: center; }
+.tile.wide .tx { flex: 1; min-width: 0; }
+
+/* ---------- страницы ---------- */
+.page { position: fixed; inset: 0; z-index: 20; background: var(--bg); display: none;
+  flex-direction: column; }
+.page.on { display: flex; }
+.phead { display: flex; align-items: center; gap: 10px; padding: calc(8px + env(safe-area-inset-top)) var(--pad) 8px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px);
+  position: sticky; top: 0; z-index: 5; }
+.phead h2 { font-size: 16.5px; flex: 1; }
+.phead .back { background: var(--card); color: var(--fg); border-radius: 10px; padding: 7px 11px; font-size: 13px; }
+.phead .act { background: var(--card); color: var(--fg); border-radius: 10px; padding: 7px 10px; font-size: 13px; }
+.pbody { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 6px var(--pad) 40px; }
+
+.card { background: var(--card); border-radius: var(--r2); padding: 12px; margin: 0 0 10px; }
+.card h3 { font-size: 13px; margin-bottom: 8px; color: var(--muted); font-weight: 650;
+  text-transform: uppercase; letter-spacing: .04em; }
+.row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; }
+.row .k { color: var(--muted); font-size: 12.5px; flex: 0 0 auto; }
+.row .v { margin-left: auto; text-align: right; word-break: break-word; }
+.stat-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:6px; }
+.stat-grid > div { background:color-mix(in srgb,var(--fg) 5%,transparent); border-radius:9px;
+  padding:8px 5px; text-align:center; }
+.stat-grid b { display:block; font-size:16px; }
+.stat-grid span { display:block; color:var(--muted); font-size:10px; margin-top:2px; }
+.list-item { padding: 10px 2px; border-bottom: 1px solid color-mix(in srgb, var(--fg) 7%, transparent); }
+.list-item:last-child { border-bottom: 0; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 10px; }
+.chip { background: var(--card); color: var(--muted); border-radius: 9px; padding: 6px 11px; font-size: 12.5px; font-weight: 600; }
+.chip.on { background: var(--acc); color: var(--accfg); }
+.pill { display: inline-block; font-size: 10.5px; font-weight: 700; border-radius: 7px; padding: 2px 7px; vertical-align: middle; }
+.pill.new { background: color-mix(in srgb, var(--acc) 22%, transparent); color: var(--link); }
+.pill.drafted { background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
+.pill.approved { background: color-mix(in srgb, var(--ok) 22%, transparent); color: var(--ok); }
+.pill.gray { background: color-mix(in srgb, var(--fg) 10%, transparent); color: var(--muted); }
+pre.code { background: color-mix(in srgb, var(--fg) 5%, transparent); border-radius: 10px; padding: 10px;
+  overflow-x: auto; margin: 8px 0; font: 11.5px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre; }
+pre.code .add { color: var(--ok); } pre.code .del { color: var(--err); } pre.code .hunk { color: var(--link); }
+.btn { background: var(--acc); color: var(--accfg); border-radius: 11px; padding: 10px 14px; font-weight: 650; font-size: 14px; }
+.btn.sec { background: var(--card); color: var(--fg); }
+.btn.danger { background: color-mix(in srgb, var(--err) 22%, transparent); color: var(--err); }
+.btn:disabled { opacity: .45; }
+.btnrow { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+textarea, input[type=text] { width: 100%; background: color-mix(in srgb, var(--fg) 6%, transparent);
+  color: var(--fg); border: 0; border-radius: 10px; padding: 10px 11px; font: inherit; outline: none; resize: none; }
+.skel { border-radius: var(--r2); background: linear-gradient(100deg, var(--card) 40%,
+  color-mix(in srgb, var(--fg) 8%, var(--card)) 50%, var(--card) 60%); background-size: 200% 100%;
+  animation: sh 1.1s infinite linear; height: 64px; margin-bottom: 10px; }
+@keyframes sh { to { background-position: -200% 0; } }
+.empty { text-align: center; color: var(--muted); padding: 34px 10px; font-size: 13.5px; }
+
+/* ---------- 3D ---------- */
+#p-arch .pbody, #p-memgraph .pbody { padding: 0; overflow: hidden; position: relative; }
+#graphwrap, #memgraphwrap { position: absolute; inset: 0; }
+#graphwrap canvas, #memgraphwrap canvas { touch-action: none !important; display: block; }
+#mglegend { position: absolute; left: 10px; bottom: calc(10px + env(safe-area-inset-bottom)); z-index: 6;
+  font-size: 10.5px; color: var(--muted); background: color-mix(in srgb, var(--bg) 80%, transparent);
+  backdrop-filter: blur(8px); border-radius: 10px; padding: 7px 9px; }
+#mglegend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin: 0 4px 0 8px; }
+#mglegend i:first-child { margin-left: 0; }
+#archui { position: absolute; left: 10px; right: 10px; top: 8px; z-index: 6; display: flex; gap: 6px; }
+#archui input { flex: 1; background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(8px);
+  box-shadow: 0 2px 12px rgba(0,0,0,.25); }
+#archui .btn.sec { background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(8px); }
+#legend { position: absolute; left: 10px; bottom: calc(10px + env(safe-area-inset-bottom)); z-index: 6;
+  font-size: 10.5px; color: var(--muted); background: color-mix(in srgb, var(--bg) 80%, transparent);
+  backdrop-filter: blur(8px); border-radius: 10px; padding: 7px 9px; }
+#legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin: 0 4px 0 8px; }
+#legend i:first-child { margin-left: 0; }
+
+/* ---------- шит ---------- */
+#sheet { position: fixed; z-index: 40; left: 0; right: 0; bottom: 0; max-height: 78%;
+  background: var(--card); border-radius: 18px 18px 0 0; box-shadow: 0 -8px 30px rgba(0,0,0,.35);
+  transform: translateY(105%); transition: transform .22s ease; display: flex; flex-direction: column; }
+#sheet.on { transform: translateY(0); }
+#sheet .grip { width: 36px; height: 4px; border-radius: 2px; background: var(--muted); opacity: .5;
+  margin: 8px auto 2px; flex: 0 0 auto; }
+#sheetbody { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 8px 16px calc(20px + env(safe-area-inset-bottom)); }
+#shade { position: fixed; inset: 0; z-index: 35; background: rgba(0,0,0,.45); opacity: 0;
+  pointer-events: none; transition: opacity .2s; }
+#shade.on { opacity: 1; pointer-events: auto; }
+
+#toast { position: fixed; z-index: 60; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom));
+  transform: translate(-50%, 20px); background: var(--card); color: var(--fg); padding: 10px 16px;
+  border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.4); opacity: 0; transition: all .2s;
+  font-size: 13.5px; max-width: 86%; text-align: center; }
+#toast.on { opacity: 1; transform: translate(-50%, 0); }
+#envbar { position: sticky; bottom: 0; padding: 10px 0 4px; background: linear-gradient(transparent, var(--bg) 30%); display: none; }
+#envbar.on { display: block; }
+</style>
+</head>
+<body>
+
+<div id="home">
+  <div id="homehead">
+    <div class="dot" id="statusdot"></div>
+    <h1>Praxis — пульт</h1>
+    <span class="commit" id="headcommit">…</span>
+  </div>
+  <div id="tiles"></div>
+</div>
+
+<div class="page" id="p-arch"><div class="phead"><button class="back" data-back>←</button><h2>Архитектура</h2><button class="act" data-refresh="arch">⟳</button><button class="act" id="greset">⌂ камера</button></div>
+  <div class="pbody"><div id="graphwrap"></div>
+    <div id="archui"><input id="gsearch" list="gnodes" placeholder="найти узел…" autocomplete="off"><datalist id="gnodes"></datalist></div>
+    <div id="legend"></div></div></div>
+
+<div class="page" id="p-pulse"><div class="phead"><button class="back" data-back>←</button><h2>Пульс</h2><button class="act" data-refresh="pulse">⟳</button></div><div class="pbody" id="b-pulse"></div></div>
+<div class="page" id="p-overview"><div class="phead"><button class="back" data-back>←</button><h2>Обзор</h2><button class="act" data-refresh="overview">⟳</button></div><div class="pbody" id="b-overview"></div></div>
+<div class="page" id="p-thoughts"><div class="phead"><button class="back" data-back>←</button><h2>Мысли</h2><button class="act" data-refresh="thoughts">⟳</button></div><div class="pbody" id="b-thoughts"></div></div>
+<div class="page" id="p-tasks"><div class="phead"><button class="back" data-back>←</button><h2>Таски</h2><button class="act" data-refresh="tasks">⟳</button></div><div class="pbody" id="b-tasks"></div></div>
+<div class="page" id="p-rooms"><div class="phead"><button class="back" data-back>←</button><h2>Комнаты</h2><button class="act" data-refresh="rooms">⟳</button></div><div class="pbody" id="b-rooms"></div></div>
+<div class="page" id="p-contacts"><div class="phead"><button class="back" data-back>←</button><h2>Контакты и отсутствие</h2><button class="act" data-refresh="contacts">⟳</button></div><div class="pbody" id="b-contacts"></div></div>
+<div class="page" id="p-mail"><div class="phead"><button class="back" data-back>←</button><h2>Почта</h2><button class="act" data-refresh="mail">⟳</button></div><div class="pbody" id="b-mail"></div></div>
+<div class="page" id="p-letter"><div class="phead"><button class="back" data-back>←</button><h2 id="lettertitle">Письмо</h2></div><div class="pbody" id="b-letter"></div></div>
+<div class="page" id="p-memory"><div class="phead"><button class="back" data-back>←</button><h2>Память</h2><button class="act" data-refresh="memory">⟳</button></div><div class="pbody" id="b-memory"></div></div>
+<div class="page" id="p-doc"><div class="phead"><button class="back" data-back>←</button><h2 id="doctitle" class="mono" style="font-size:13px">…</h2></div><div class="pbody" id="b-doc"></div></div>
+<div class="page" id="p-props"><div class="phead"><button class="back" data-back>←</button><h2>Предложения</h2><button class="act" data-refresh="props">⟳</button></div><div class="pbody" id="b-props"></div></div>
+<div class="page" id="p-prop"><div class="phead"><button class="back" data-back>←</button><h2 id="proptitle">Предложение</h2></div><div class="pbody" id="b-prop"></div></div>
+<div class="page" id="p-actions"><div class="phead"><button class="back" data-back>←</button><h2>Действия</h2><button class="act" data-refresh="actions">⟳</button></div><div class="pbody" id="b-actions"></div></div>
+<div class="page" id="p-server"><div class="phead"><button class="back" data-back>←</button><h2>Сервер</h2><button class="act" data-refresh="server">⟳</button></div><div class="pbody" id="b-server"></div></div>
+<div class="page" id="p-env"><div class="phead"><button class="back" data-back>←</button><h2>Параметры</h2></div><div class="pbody" id="b-env"></div></div>
+<div class="page" id="p-brain"><div class="phead"><button class="back" data-back>←</button><h2>Мозг</h2><button class="act" data-refresh="brain">⟳</button></div><div class="pbody" id="b-brain"></div></div>
+<div class="page" id="p-self"><div class="phead"><button class="back" data-back>←</button><h2>Я</h2><button class="act" data-refresh="self">⟳</button></div><div class="pbody" id="b-self"></div></div>
+<div class="page" id="p-percept"><div class="phead"><button class="back" data-back>←</button><h2>Восприятие</h2><button class="act" data-refresh="percept">⟳</button></div><div class="pbody" id="b-percept"></div></div>
+<div class="page" id="p-memgraph"><div class="phead"><button class="back" data-back>←</button><h2>Граф памяти</h2><button class="act" id="mgreset">⌂ камера</button></div>
+  <div class="pbody"><div id="memgraphwrap"></div><div id="mglegend"></div></div></div>
+<div class="page" id="p-commits"><div class="phead"><button class="back" data-back>←</button><h2>Коммиты</h2></div><div class="pbody" id="b-commits"></div></div>
+<div class="page" id="p-commit"><div class="phead"><button class="back" data-back>←</button><h2 id="committitle" class="mono">…</h2></div><div class="pbody" id="b-commit"></div></div>
+<div class="page" id="p-skills"><div class="phead"><button class="back" data-back>←</button><h2>Скиллы</h2></div><div class="pbody" id="b-skills"></div></div>
+<div class="page" id="p-logs"><div class="phead"><button class="back" data-back>←</button><h2>Логи</h2><button class="act" data-refresh="logs">⟳</button></div><div class="pbody" id="b-logs"></div></div>
+
+<div id="shade"></div>
+<div id="sheet"><div class="grip"></div><div id="sheetbody"></div></div>
+<div id="toast"></div>
+
+<script src="/panel/vendor/3d-force-graph.min.js"></script>
+<script>
+"use strict";
+const tg = window.Telegram && Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand();
+  if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();   // фикс: апп больше не ездит с камерой
+  else if ("isVerticalSwipesEnabled" in tg) tg.isVerticalSwipesEnabled = false;
+}
+const $ = (s, r) => (r || document).querySelector(s);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const hap = k => { try { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred(k || "light"); } catch (e) {} };
+function toast(msg, ms) { const t = $("#toast"); t.textContent = msg; t.classList.add("on");
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("on"), ms || 2200); }
+
+async function api(path, opts) {
+  const r = await fetch(path, Object.assign({}, opts, {
+    headers: Object.assign({ "X-Telegram-Init-Data": tg ? tg.initData : "",
+                             "Content-Type": "application/json" }, (opts || {}).headers || {}) }));
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+const post = (p, body) => api(p, { method: "POST", body: JSON.stringify(body || {}) });
+
+/* ---------- роутер: стек страниц + BackButton ---------- */
+const stack = [];
+function syncBack() { if (!tg || !tg.BackButton) return;
+  stack.length ? tg.BackButton.show() : tg.BackButton.hide(); }
+function open(id, onOpen) { const p = $("#p-" + id); if (!p) return;
+  stack.push(id); p.classList.add("on"); syncBack(); hap();
+  if (onOpen) onOpen(); }
+function back() { const id = stack.pop(); if (id) $("#p-" + id).classList.remove("on");
+  closeSheet(); syncBack(); }
+if (tg && tg.BackButton) tg.BackButton.onClick(back);
+document.addEventListener("click", e => {
+  if (e.target.closest("[data-back]")) back();
+  const r = e.target.closest("[data-refresh]");
+  if (r) { hap(); sections[r.dataset.refresh] && sections[r.dataset.refresh](); }
+});
+
+/* ---------- шит ---------- */
+function openSheet(html) { $("#sheetbody").innerHTML = html; $("#sheet").classList.add("on");
+  $("#shade").classList.add("on"); }
+function closeSheet() { $("#sheet").classList.remove("on"); $("#shade").classList.remove("on"); }
+$("#shade").addEventListener("click", closeSheet);
+
+/* ---------- хаб ---------- */
+const TILES = [
+  { id: "arch",     ic: "🕸️", nm: "Архитектура", sub: "3D-граф её кода" },
+  { id: "pulse",    ic: "💓", nm: "Пульс",       sub: "…" },
+  { id: "overview", ic: "🧭", nm: "Обзор",       sub: "намерения · задачи · нити · решения" },
+  { id: "thoughts", ic: "💭", nm: "Мысли",       sub: "…" },
+  { id: "tasks",    ic: "✅", nm: "Таски",       sub: "…" },
+  { id: "props",    ic: "🛠️", nm: "Предложения", sub: "её правки — твой мёрж" },
+  { id: "memory",   ic: "🗂️", nm: "Память",      sub: "люди · дневник · душа" },
+  { id: "memgraph", ic: "🕸", nm: "Граф памяти", sub: "кто с кем связан" },
+  { id: "actions",  ic: "🔨", nm: "Действия",    sub: "…" },
+  { id: "contacts", ic: "👥", nm: "Контакты",    sub: "важные + отсутствие" },
+  { id: "rooms",    ic: "🚪", nm: "Комнаты",     sub: "режимы · контекст" },
+  { id: "mail",     ic: "✉️", nm: "Почта",       sub: "…" },
+  { id: "server",   ic: "🖥️", nm: "Сервер",      sub: "…" },
+  { id: "brain",    ic: "🧠", nm: "Мозг",        sub: "модели · ключи · фолбэк" },
+  { id: "self",     ic: "🪞", nm: "Я",           sub: "версии души · деформации" },
+  { id: "percept",  ic: "👁️", nm: "Восприятие",  sub: "рычаги · причины пропуска" },
+  { id: "env",      ic: "🎛️", nm: "Параметры",   sub: "ручки поведения" },
+  { id: "commits",  ic: "🌱", nm: "Коммиты",     sub: "история дома" },
+  { id: "skills",   ic: "📚", nm: "Скиллы",      sub: "…" },
+  { id: "logs",     ic: "📜", nm: "Логи",        sub: "praxis · mailbot · boot" },
+];
+const LOADERS = { arch: loadArch, pulse: loadPulse, overview: loadOverview, thoughts: loadThoughts, tasks: loadTasks, props: loadProps,
+  memory: loadMemory, memgraph: loadMemGraph, actions: loadActions, contacts: loadContacts, rooms: loadRooms,
+  mail: loadMail, server: loadServer, env: loadEnv, brain: loadBrain, self: loadSelf, percept: loadPercept,
+  commits: loadCommits, skills: loadSkills, logs: loadLogs };
+const sections = { pulse: loadPulse, overview: loadOverview, thoughts: loadThoughts, tasks: loadTasks, props: loadProps, mail: loadMail,
+  contacts: loadContacts, rooms: loadRooms, memory: loadMemory, actions: loadActions, server: loadServer,
+  brain: loadBrain, self: loadSelf, percept: loadPercept, arch: loadArch,
+  logs: () => loadLogs(curLog) };
+let ROLE = "owner";
+const GUEST_TILES = ["arch", "memory", "actions", "pulse", "server", "commits", "skills"];
+function renderTiles() {
+  $("#tiles").innerHTML = TILES.filter(t => ROLE === "owner" || GUEST_TILES.includes(t.id)).map(t => `
+  <button class="tile" data-t="${t.id}">
+    <span class="badge" id="bdg-${t.id}"></span>
+    <span class="ic">${t.ic}</span>
+    <span class="nm">${t.nm}</span>
+    <span class="sub" id="sub-${t.id}">${t.sub}</span>
+  </button>`).join("");
+}
+renderTiles();
+// Ф1.7: бейджи стреляют ПОСЛЕ ответа /me — гость не бьётся об owner-эндпоинты на старте
+api("/api/panel/me").then(m => { if (m.role && m.role !== ROLE) { ROLE = m.role; renderTiles(); }
+  homeBadges(); }).catch(() => homeBadges());
+$("#tiles").addEventListener("click", e => { const b = e.target.closest("[data-t]");
+  if (b) open(b.dataset.t, LOADERS[b.dataset.t]); });
+
+function setSub(id, text) { const el = $("#sub-" + id); if (el && text) el.textContent = text; }
+function setBadge(id, n) { const el = $("#bdg-" + id); if (!el) return;
+  if (n > 0) { el.textContent = n > 99 ? "99+" : n; el.classList.add("on"); } else el.classList.remove("on"); }
+
+async function homeBadges() {
+  api("/api/panel/server").then(s => {
+    $("#headcommit").textContent = s.head || "";
+    const la = (s.loadavg || "").split(" ")[0], mem = s.mem || {};
+    setSub("server", `load ${la || "?"} · RAM ${mem.available_mb || "?"}М свободно`);
+    const fresh = s.logs && s.logs.praxis ? s.logs.praxis.age_sec : 1e9;
+    $("#statusdot").className = "dot " + (fresh < 900 ? "ok" : "err");
+  }).catch(() => { $("#statusdot").className = "dot err"; });
+  api("/api/panel/pulse").then(p => {
+    const n = (p.tasks || []).length;
+    setSub("tasks", n ? `открытых: ${n}` : "открытых нет"); setBadge("tasks", n);
+    const hb = p.heartbeat; let hbs = "хартбит: нет данных";
+    if (hb && (hb.last || hb.last_ts)) hbs = "хартбит: " + String(hb.last || hb.last_ts).slice(0, 16);
+    const ua = (p.unanswered || []).length;
+    const vl = p.voice_log; setSub("pulse", (ua ? `✉ без ответа: ${ua} · ` : "") + (vl ? `лог ${fmtAge(vl.age_sec)} · ${hbs}` : hbs));
+    setBadge("pulse", ua);
+  }).catch(() => {});
+  if (ROLE === "owner") api("/api/panel/overview").then(o => {
+    const c = o.counts || {};
+    setSub("overview", `намерения ${c.desires || 0} · задачи ${c.tasks || 0} · нити ${c.loops || 0}`);
+    setBadge("overview", 0);
+  }).catch(() => {});
+  if (ROLE === "owner") api("/api/panel/thoughts?days=1").then(t => {
+    const n = (t.items || []).length, ev = (t.items || []).filter(i => i.kind === "evaluator").length;
+    setSub("thoughts", n ? `за сутки: ${n}${ev ? " · legacy: " + ev : ""}` : "за сутки тихо");
+    setBadge("thoughts", ev);
+  }).catch(() => {});
+  if (ROLE === "owner") api("/api/inbox").then(m => {
+    const items = m.items || [], nw = items.filter(i => i.status === "new").length;
+    setSub("mail", items.length ? `в ящике: ${items.length}${nw ? " · новых: " + nw : ""}` : "ящик пуст");
+    setBadge("mail", nw);
+  }).catch(() => {});
+  if (ROLE === "owner") api("/api/panel/proposals").then(p => {
+    const n = p.pending || 0;
+    setSub("props", n ? `ждут решения: ${n}` : "новых нет"); setBadge("props", n);
+  }).catch(() => {});
+  api("/api/panel/skills").then(s => setSub("skills", `в блокноте: ${(s.items || []).length}`)).catch(() => {});
+  api("/api/panel/actions").then(a => {
+    const today = new Date().toISOString().slice(5, 10);
+    const n = (a.items || []).filter(i => i.day === today).length;
+    setSub("actions", n ? `сегодня: ${n}` : "сегодня тихо");
+  }).catch(() => {});
+  if (ROLE === "owner") api("/api/panel/absence").then(a => {
+    setSub("contacts", a.active ? `⏳ отсутствие до ${a.until}` : `важных: ${(a.contacts || []).length}`);
+    setBadge("contacts", a.active ? 1 : 0);
+  }).catch(() => {});
+  if (ROLE === "owner") api("/api/panel/identity").then(d => {
+    const sh = (d.shifts || [])[0];
+    setSub("self", sh ? `сдвиг: ${String(sh.ts || "").slice(5, 16).replace("T", " ")}` : "версии души · нагрузка");
+  }).catch(() => {});
+  if (ROLE === "owner") api("/api/panel/perception").then(p => {
+    const over = (p.knobs || []).filter(k => k.source !== "default" && k.source !== "env").length;
+    const sk = Object.values(p.skips_today || {}).reduce((a, b) => a + b, 0);
+    setSub("percept", `${over ? "рычагов её: " + over + " · " : ""}${sk ? "пропусков: " + sk : "пропусков нет"}`);
+  }).catch(() => {});
+  if (ROLE === "owner") api("/api/panel/llm").then(d => {
+    const v = d.roles.voice || {}, ev = d.roles.evaluator || {};
+    setSub("brain", `голос ${v.model || "?"} · вспомогательная ${ev.model || "?"}`);
+    const warn = v.on_fallback || ev.on_fallback;
+    const el = $("#bdg-brain");
+    if (el) { if (warn) { el.textContent = "⚠"; el.classList.add("on"); } else el.classList.remove("on"); }
+  }).catch(() => {});
+}
+const fmtAge = s => s < 90 ? s + "с" : s < 5400 ? Math.round(s / 60) + "м" : Math.round(s / 3600) + "ч";
+setInterval(homeBadges, 60000);
+(() => { const h = new URLSearchParams(location.search).get("s") || (location.hash || "").slice(1);
+  if (h && LOADERS[h]) open(h, LOADERS[h]); })();
+
+/* ---------- Архитектура (3D) ---------- */
+const KIND_COLOR = { core: "#5b8cff", test: "#41c98a", soul: "#c78bff", skill: "#ffa94d",
+  memory: "#e6c86e", web: "#ff6b81", doc: "#9aa4b2", md: "#c78bff" };
+let G = null, GDATA = null;
+function loadArch() {
+  const wrap = $("#graphwrap");
+  api("/api/panel/graph").then(g => {
+    GDATA = g;
+    const kinds = {};
+    g.nodes.forEach(n => kinds[n.kind] = (kinds[n.kind] || 0) + 1);
+    $("#legend").innerHTML = Object.keys(kinds).map(k =>
+      `<i style="background:${KIND_COLOR[k] || "#888"}"></i>${k} ${kinds[k]}`).join("");
+    $("#gnodes").innerHTML = g.nodes.map(n => `<option value="${esc(n.id)}">`).join("");
+    if (G) { G.graphData({ nodes: g.nodes, links: g.links }); return; } // Ф1.8: её самоправки видны по ⟳
+    G = ForceGraph3D()(wrap)
+      .backgroundColor(getComputedStyle(document.body).getPropertyValue("--bg").trim() || "#0f1115")
+      .graphData({ nodes: g.nodes, links: g.links })
+      .nodeLabel(n => `${n.id}${n.doc ? " — " + esc(n.doc) : ""}`)
+      .nodeColor(n => KIND_COLOR[n.kind] || "#888")
+      .nodeVal(n => Math.max(1, Math.cbrt((n.size || 1) / 120)))
+      .linkColor(l => l.kind === "reads" ? "#e6c86e" : l.kind === "indexed" ? "#ffa94d" : "#5b8cff")
+      .linkOpacity(0.35)
+      .linkWidth(l => Math.min(3, 0.5 + (l.weight || 1) * 0.3))
+      .onNodeClick(n => { focusNode(n); openNode(n.id); })
+      .onBackgroundClick(closeSheet);
+    G.controls().dampingFactor = 0.12;
+    setTimeout(() => G.zoomToFit(600, 40), 700);
+  }).catch(e => toast("граф не загрузился: " + e.message));
+}
+function focusNode(n) {
+  if (!G || n.x == null) return;
+  const d = 130, r = 1 + d / Math.hypot(n.x, n.y, n.z || 1);
+  G.cameraPosition({ x: n.x * r, y: n.y * r, z: (n.z || 1) * r }, n, 700);
+}
+$("#greset").addEventListener("click", () => { hap(); G && G.zoomToFit(600, 40); });
+$("#gsearch").addEventListener("change", e => {
+  const id = e.target.value.trim(); if (!GDATA || !G) return;
+  const n = G.graphData().nodes.find(x => x.id === id);
+  if (n) { focusNode(n); openNode(n.id); e.target.blur(); }
+});
+
+/* ---------- Граф памяти (PASS 8.6): люди/темы + рёбра из ## Связи и graph.md ---------- */
+const MG_COLOR = { people: "#c78bff", topic: "#e6c86e" };
+let MG = null;
+function loadMemGraph() {
+  api("/api/panel/memgraph").then(g => {
+    const wrap = $("#memgraphwrap");
+    const people = g.nodes.filter(n => n.kind === "people").length;
+    $("#mglegend").innerHTML =
+      `<i style="background:${MG_COLOR.people}"></i>люди ${people}` +
+      `<i style="background:${MG_COLOR.topic}"></i>темы ${g.nodes.length - people}` +
+      ` · рёбер ${g.links.length}`;
+    if (!g.nodes.length) {
+      wrap.innerHTML = `<div class="empty" style="padding-top:40vh">Граф пока пуст — связи появляются<br>
+        из remember(relates_to=…) и «сна».</div>`;
+      return;
+    }
+    const data = { nodes: g.nodes,
+      links: g.links.map(l => ({ source: l.a, target: l.b, label: l.label })) };
+    if (MG) { MG.graphData(data); return; }
+    MG = ForceGraph3D()(wrap)
+      .backgroundColor(getComputedStyle(document.body).getPropertyValue("--bg").trim() || "#0f1115")
+      .graphData(data)
+      .nodeLabel(n => `${esc(n.label)} (${n.kind === "people" ? "человек" : "тема"}, связей: ${n.degree})`)
+      .nodeColor(n => MG_COLOR[n.kind] || "#888")
+      .nodeVal(n => Math.max(1, 1 + n.degree * 0.8))
+      .linkColor(() => "#8a919e")
+      .linkOpacity(0.4)
+      .linkLabel(l => esc(l.label || ""))
+      .onNodeClick(n => { mgFocus(n); openMemNode(n); })
+      .onBackgroundClick(closeSheet);
+    MG.controls().dampingFactor = 0.12;
+    setTimeout(() => MG.zoomToFit(600, 40), 700);
+  }).catch(e => toast("граф памяти не загрузился: " + e.message));
+}
+function mgFocus(n) {
+  if (!MG || n.x == null) return;
+  const d = 110, r = 1 + d / Math.hypot(n.x, n.y, n.z || 1);
+  MG.cameraPosition({ x: n.x * r, y: n.y * r, z: (n.z || 1) * r }, n, 700);
+}
+$("#mgreset").addEventListener("click", () => { hap(); MG && MG.zoomToFit(600, 40); });
+async function openMemNode(n) {
+  if (n.kind === "people") {
+    openSheet(`<div class="skel"></div>`);
+    try {
+      const d = await api("/api/panel/memory/read?path=" + encodeURIComponent("memory/people/" + n.id + ".md"));
+      openSheet(`<h2 style="font-size:15px">${esc(n.label)}</h2>
+        <pre class="code" style="white-space:pre-wrap">${esc(d.text || "")}</pre>`);
+    } catch (e) { openSheet(`<div class="empty">досье не прочиталось: ${esc(e.message)}</div>`); }
+    return;
+  }
+  const edges = (MG ? MG.graphData().links : []).filter(l =>
+    (l.source.id || l.source) === n.id || (l.target.id || l.target) === n.id);
+  openSheet(`<h2 style="font-size:15px">${esc(n.label)} <span class="pill gray">тема</span></h2>
+    <div class="card" style="margin-top:8px">${edges.map(l => {
+      const a = l.source.label || l.source.id || l.source, b = l.target.label || l.target.id || l.target;
+      return `<div class="row"><span class="small">${esc(a)} — ${esc(b)}</span>
+        <span class="v small muted">${esc(l.label || "связаны")}</span></div>`; }).join("")
+      || `<div class="muted small">рёбер нет</div>`}</div>`);
+}
+
+async function openNode(rel) {
+  openSheet(`<div class="skel"></div><div class="skel"></div>`);
+  let f; try { f = await api("/api/panel/file/" + encodeURIComponent(rel).replace(/%2F/g, "/")); }
+  catch (e) { openSheet(`<div class="empty">не прочитался: ${esc(e.message)}</div>`); return; }
+  const chips = [f.kind, fmtSize(f.size), f.loc ? f.loc + " строк" : "", f.funcs && f.funcs.length ? f.funcs.length + " функц." : ""]
+    .filter(Boolean).map(c => `<span class="pill gray">${esc(c)}</span>`).join(" ");
+  const rels = [];
+  const relBlock = (title, arr) => (arr && arr.length) &&
+    rels.push(`<div class="row"><span class="k">${title}</span><span class="v small">${arr.map(esc).join(", ")}</span></div>`);
+  relBlock("импортирует", f.imports); relBlock("импортируют его", f.imported_by);
+  relBlock("читает", f.reads); relBlock("читают его", f.read_by);
+  const funcs = (f.funcs && f.funcs.length && typeof f.funcs !== "number")
+    ? `<div class="card"><h3>Функции</h3>${f.funcs.slice(0, 40).map(fn =>
+        `<div class="row"><span class="mono">${esc(fn.name || fn)}</span><span class="v small muted">${esc(fn.doc || "")}</span></div>`).join("")}</div>` : "";
+  openSheet(`
+    <h2 class="mono" style="font-size:14px">${esc(rel)}</h2>
+    <div style="margin:6px 0 2px">${chips}</div>
+    ${f.doc ? `<p class="small muted">${esc(f.doc)}</p>` : ""}
+    ${rels.length ? `<div class="card"><h3>Связи</h3>${rels.join("")}</div>` : ""}
+    ${funcs}
+    <div id="nodeextra"></div>
+    <div class="btnrow">
+      ${ROLE === "owner" ? `<button class="btn sec" id="nExplain">Объяснить</button>
+      <button class="btn sec" id="nAsk">Спросить</button>
+      <button class="btn sec" id="nFix">Поправить</button>` : ""}
+      <button class="btn sec" id="nSrc">Исходник</button>
+    </div>`);
+  if ($("#nExplain")) $("#nExplain").onclick = async () => { hap(); const x = $("#nodeextra");
+    x.innerHTML = `<div class="skel"></div>`;
+    try { let e = await api("/api/panel/explain/" + rel);
+      if (!e || !e.text) e = await post("/api/panel/explain/" + rel, {});
+      x.innerHTML = `<div class="card"><h3>Объяснение</h3><div class="small">${esc(e.text || "пусто")}</div></div>`;
+    } catch (err) { x.innerHTML = `<div class="empty">${esc(err.message)}</div>`; } };
+  if ($("#nAsk")) $("#nAsk").onclick = () => nodePrompt(rel, "ask");
+  if ($("#nFix")) $("#nFix").onclick = () => nodePrompt(rel, "fix");
+  $("#nSrc").onclick = async () => { hap(); const x = $("#nodeextra");
+    x.innerHTML = `<div class="skel"></div>`;
+    try { const f2 = await api("/api/panel/file/" + rel + "?src=1");
+      x.innerHTML = `<pre class="code">${esc(f2.source || "")}</pre>`;
+    } catch (err) { x.innerHTML = `<div class="empty">${esc(err.message)}</div>`; } };
+}
+function nodePrompt(rel, mode) {
+  hap();
+  const x = $("#nodeextra");
+  const ph = mode === "ask" ? "спросить про этот файл…" : "что поправить (уйдёт ей таск-окном)…";
+  x.innerHTML = `<div class="card"><textarea id="npText" rows="2" placeholder="${ph}"></textarea>
+    <div class="btnrow"><button class="btn" id="npGo">${mode === "ask" ? "Спросить" : "Отправить ей"}</button></div>
+    <div id="npOut"></div></div>`;
+  $("#npGo").onclick = async () => {
+    const q = $("#npText").value.trim(); if (!q) return;
+    $("#npGo").disabled = true; $("#npOut").innerHTML = `<div class="skel"></div>`;
+    try {
+      if (mode === "ask") { const a = await post("/api/panel/ask", { path: rel, question: q });
+        $("#npOut").innerHTML = `<div class="small" style="margin-top:8px">${esc(a.answer || a.text || "…")}</div>`;
+      } else { await post("/api/panel/task", { path: rel, request: q });
+        $("#npOut").innerHTML = ""; toast("ушло ей — возьмёт в таск-окне"); }
+    } catch (e) { $("#npOut").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+    $("#npGo").disabled = false; };
+}
+const fmtSize = b => b > 1048576 ? (b / 1048576).toFixed(1) + "М" : b > 1024 ? Math.round(b / 1024) + "К" : b + "Б";
+
+/* ---------- Пульс ---------- */
+async function loadPulse() {
+  const b = $("#b-pulse"); b.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+  let p; try { p = await api("/api/panel/pulse"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const hb = p.heartbeat, hbHtml = hb
+    ? Object.entries(hb).slice(0, 8).map(([k, v]) =>
+        `<div class="row"><span class="k">${esc(k)}</span><span class="v small mono">${esc(typeof v === "object" ? JSON.stringify(v) : v)}</span></div>`).join("")
+    : `<div class="muted small">данных ещё нет</div>`;
+  const tasks = (p.tasks || []).slice(0, 6).map(t => `
+    <div class="list-item"><div>${esc(t.goal || t.kind || "?")}</div>
+      <div class="small muted">${esc(t.when || "без срока")} · ${esc(t.id || "")}</div></div>`).join("")
+    || `<div class="muted small">открытых нет</div>`;
+  const cons = (p.consolidations || []).map(c => `
+    <div class="row"><span class="k mono">${esc(c.chat)}</span><span class="v small muted">${esc(c.mtime)} · ${fmtSize(c.chars)}</span></div>`).join("")
+    || `<div class="muted small">сводок пока нет — ни один чат не дорос до свёртки</div>`;
+  const ua = (p.unanswered || []).map(u => `
+    <div class="row"><span class="k">${esc(u.name)}</span><span class="v small muted">${u.hours < 1 ? Math.max(1, Math.round(u.hours * 60)) + "м" : Math.round(u.hours) + "ч"} без ответа</span></div>`).join("");
+  const imm = (p.immune || []).map(x => `<div class="small muted" style="margin:3px 0">${esc(x)}</div>`).join("");
+  const w = p.windows, winCard = w ? `
+    <div class="card"><h3>Окна</h3>
+      <div class="row"><span class="k">сегодня</span><span class="v mono">${w.today}</span></div>
+      <div class="row"><span class="k">за неделю</span><span class="v mono">${w.week}</span></div>
+      ${(w.recent || []).map(r => `<div class="small ${String(r.verdict).toUpperCase() === "НЕТ" ? "muted" : ""}" style="margin:3px 0">${esc(r.ts)} — ${esc(r.verdict)}</div>`).join("") || `<div class="small muted">решений ещё не было</div>`}
+    </div>` : "";
+  b.innerHTML = `
+    <div class="card"><h3>Голос</h3><div class="row"><span class="k">лог писал</span>
+      <span class="v">${p.voice_log ? fmtAge(p.voice_log.age_sec) + " назад" : "нет данных"}</span></div></div>
+    ${ua ? `<div class="card"><h3>Неотвеченные ЛС</h3>${ua}</div>` : ""}
+    ${imm ? `<div class="card"><h3>🛡 Иммунитет</h3>${imm}</div>` : ""}
+    ${winCard}
+    <div class="card"><h3>Хартбит</h3>${hbHtml}</div>
+    <div class="card"><h3>Расписание / таски</h3>${tasks}
+      <div class="btnrow"><button class="btn sec" id="pulse2tasks">Все таски →</button></div></div>
+    <div class="card"><h3>Консолидации контекста</h3>${cons}
+      ${p.last_context_fold ? `<div class="small muted" style="margin-top:6px">${esc(p.last_context_fold)}</div>` : ""}
+      ${p.sleep_report ? `<div class="small" style="margin-top:6px">😴 ${esc(p.sleep_report)}</div>` : ""}</div>`;
+  $("#pulse2tasks").onclick = () => open("tasks", loadTasks);
+}
+
+/* ---------- Обзор ---------- */
+async function loadOverview() {
+  const b = $("#b-overview"); b.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+  let o; try { o = await api("/api/panel/overview"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const empty = text => `<div class="muted small">${text}</div>`;
+  const desires = (o.desires || []).map(x => `<div class="list-item"><div>${esc(x.statement || "?")}</div><div class="small muted">${esc(x.status || "?")} · ${esc(x.stage || "?")}${x.next_move ? " · " + esc(x.next_move) : ""}</div></div>`).join("") || empty("живых намерений нет");
+  const tasks = (o.tasks || []).map(x => `<div class="list-item"><div>${esc(x.goal || "?")}</div><div class="small muted">${esc(x.when || "без срока")} · ${esc(x.kind || "task")}</div></div>`).join("") || empty("открытых задач нет");
+  const loops = (o.loops || []).map(x => `<div class="list-item"><div>${esc(x.text || "?")}</div><div class="small muted">${x.state === "parked" ? "припаркована" : "открыта"} · ${esc(x.name || x.slug || "?")}</div></div>`).join("") || empty("нитей нет");
+  const followups = (o.followups || []).map(x => `<div class="row"><span class="k">${esc(x.target_label || x.id || "?")}</span><span class="v small muted">${esc(x.status || "?")} · ${esc(x.age_hours)}ч${x.has_response ? " · есть ответ" : ""}</span></div>`).join("") || empty("follow-up записей нет");
+  const skips = (o.skips || []).map(x => `<div class="row"><span class="k">${esc(x.class || "?")} · ${esc(x.stage || "?")}</span><span class="v small muted">${x.repeat_count > 1 ? "×" + x.repeat_count : "один раз"}</span></div>`).join("") || empty("пропусков нет");
+  const turns = (o.recent_turns || []).map(x => `<div class="list-item"><div>${esc(x.praxis_decision || "решение не записано")}</div><div class="small muted">${esc(x.kind || "turn")}${x.advisor_verdict ? " · совет: " + esc(x.advisor_verdict) : ""}${x.rewrote ? " · переписала" : ""}</div></div>`).join("") || empty("недавних зафиксированных решений нет");
+  b.innerHTML = `
+    <div class="card"><h3>Живые намерения (${(o.desires || []).length})</h3>${desires}</div>
+    <div class="card"><h3>Scheduled tasks (${(o.tasks || []).length})</h3>${tasks}</div>
+    <div class="card"><h3>Добровольные нити (${(o.loops || []).length})</h3>${loops}</div>
+    <div class="card"><h3>Telegram follow-up (${(o.followups || []).length})</h3>${followups}</div>
+    <div class="card"><h3>Пропуски до голоса (${(o.skips || []).length})</h3>${skips}</div>
+    <div class="card"><h3>Недавние решения (${(o.recent_turns || []).length})</h3>${turns}</div>
+    <p class="small muted" style="padding:0 4px">Секции намеренно не слиты в одну очередь: таймер, задача, нить, follow-up и решение — разные сущности. Снимок: ${esc(o.generated_at || "?")}.</p>`;
+}
+
+/* ---------- Мысли ---------- */
+const TKIND = { evaluator: ["🧾", "legacy-запись"], silence: ["🤫", "молчание"], restart: ["🔄", "рестарт"],
+  panic: ["⛔", "паника"], context: ["🧠", "контекст"], immune: ["🛡", "иммунитет"] };
+let tFilter = "";
+async function loadThoughts() {
+  const b = $("#b-thoughts"); b.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+  let t; try { t = await api("/api/panel/thoughts?days=3"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const items = t.items || [];
+  const counts = {}; items.forEach(i => counts[i.kind] = (counts[i.kind] || 0) + 1);
+  const chips = [["", "все " + items.length]].concat(Object.keys(TKIND).filter(k => counts[k])
+    .map(k => [k, TKIND[k][1] + " " + counts[k]]));
+  const feed = items.filter(i => !tFilter || i.kind === tFilter).map(i => `
+    <div class="list-item"><div class="small"><span>${TKIND[i.kind] ? TKIND[i.kind][0] : "•"}</span>
+      <b>${TKIND[i.kind] ? TKIND[i.kind][1] : i.kind}</b>
+      <span class="muted">· ${esc(i.day.slice(5))} ${esc(i.time)}</span></div>
+      <div style="margin-top:3px">${esc(i.text)}</div></div>`).join("");
+  const desires = t.desires || [];
+  const STAGE_RU = { noticed: "заметила", wanted: "захотела", chosen: "выбрала",
+    acted: "действовала", observed: "увидела результат", changed: "изменила курс" };
+  const desireRows = desires.map(d => `
+    <div class="list-item">
+      <div style="display:flex;gap:8px;align-items:flex-start">
+        <b style="flex:1">${esc(d.statement || d.id)}</b>
+        <span class="small muted">${esc(STAGE_RU[d.stage] || d.stage || "?")} · ${esc(d.status || "?")}</span>
+      </div>
+      ${d.why_it_matters ? `<div class="small muted" style="margin-top:4px">зачем: ${esc(d.why_it_matters)}</div>` : ``}
+      ${d.next_move ? `<div class="small" style="margin-top:4px">дальше: ${esc(d.next_move)}</div>` : ``}
+    </div>`).join("");
+  const desireCard = `<div class="card"><h3>Желания и намерения (${desires.length})</h3>
+    ${desireRows || `<div class="muted small">пока нет явно записанных намерений</div>`}
+    <div class="small muted" style="margin-top:6px">Свободный текст и причинная история: заметила → захотела → выбрала → действовала → увидела → изменила. Панель наблюдает, но не назначает ей характер.</div></div>`;
+  b.innerHTML = `
+    ${desireCard}
+    <div class="chips">${chips.map(([k, l]) => `<button class="chip ${tFilter === k ? "on" : ""}" data-tf="${k}">${l}</button>`).join("")}</div>
+    <div class="card">${feed || `<div class="empty">тихо — ни срывов, ни рестартов</div>`}</div>
+    <p class="small muted" style="padding:0 4px">🧾 — исторические записи прежнего контура; 🤫 — явно выбранное молчание; всё из её журнала.</p>`;
+  b.querySelectorAll("[data-tf]").forEach(c => c.onclick = () => { tFilter = c.dataset.tf; hap(); loadThoughts(); });
+}
+
+/* ---------- Таски ---------- */
+async function loadTasks() {
+  const b = $("#b-tasks"); b.innerHTML = `<div class="skel"></div>`;
+  let t; try { t = await api("/api/panel/tasks"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const items = (t.items || []).map(x => `
+    <div class="list-item"><div>${esc(x.goal || "?")}</div>
+      <div class="small muted" style="display:flex;gap:8px;align-items:center">
+        <span>${esc(x.when || "без срока")}${x.recur ? " · " + esc(x.recur) : ""} · <span class="mono">${esc(x.id || "")}</span></span>
+        <button class="btn danger" style="margin-left:auto;padding:5px 10px;font-size:12px" data-cancel="${esc(x.id)}">снять</button>
+      </div></div>`).join("");
+  b.innerHTML = `
+    <div class="card"><h3>Дать таск</h3>
+      <textarea id="taskGoal" rows="2" placeholder="что сделать (возьмёт в ближайшем таск-окне)…"></textarea>
+      <div style="height:8px"></div>
+      <input type="text" id="taskWhen" placeholder="когда (не обязательно): 21:30 / завтра 10:00">
+      <div class="btnrow"><button class="btn" id="taskAdd">Отправить</button></div></div>
+    <div class="card"><h3>Открытые</h3>${items || `<div class="muted small">пусто</div>`}</div>`;
+  $("#taskAdd").onclick = async () => {
+    const goal = $("#taskGoal").value.trim(); if (!goal) return;
+    $("#taskAdd").disabled = true;
+    try { const r = await post("/api/panel/tasks/add", { goal, when: $("#taskWhen").value.trim() });
+      if (r.error) toast(r.error); else { toast("таск у неё"); hap("medium"); loadTasks(); } }
+    catch (e) { toast("не ушло: " + e.message); }
+    $("#taskAdd").disabled = false; };
+  b.querySelectorAll("[data-cancel]").forEach(btn => btn.onclick = async () => {
+    try { await post("/api/panel/tasks/cancel", { id: btn.dataset.cancel }); toast("снят"); loadTasks(); }
+    catch (e) { toast(e.message); } });
+}
+
+/* ---------- Комнаты: явные режимы и кнопки владения ---------- */
+const MODE_ICO = { normal: "🟢", observer: "👀", quiet: "🤫", frozen: "❄️", dead: "💀" };
+const MODE_NM = { normal: "обычный", observer: "наблюдатель", quiet: "тише", frozen: "заморожена", dead: "мертва" };
+async function loadRooms() {
+  const b = $("#b-rooms"); b.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+  let r; try { r = await api("/api/panel/rooms"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const items = (r.items || []).map(x => {
+    const until = x.until ? ` · до ${esc(x.until.replace("T", " ").slice(0, 16))}` : "";
+    /* Подпись автора берётся из API (rooms.author_label), а не пересобирается здесь:
+       свой словарь {praxis, owner} рисовал ПУСТОТУ на новых значениях protocol/unknown,
+       то есть «никто этого не выбирал» и «не записано» были неотличимы от «нет данных» —
+       ровно та подмена авторства, ради снятия которой поля author и заводились. */
+    const who = x.author || "";
+    const dwho = x.disclosure_author ? ` (${esc(x.disclosure_author)})` : "";
+    return `
+    <div class="card">
+      <div style="display:flex;gap:8px;align-items:center">
+        <b style="flex:1">${MODE_ICO[x.mode] || "❔"} ${esc(x.title)}</b>
+        <span class="small muted mono">${esc(x.id)}</span>
+      </div>
+      <div class="small muted" style="margin:4px 0 2px">режим: ${MODE_NM[x.mode] || esc(x.mode)}${who ? " (" + esc(who) + ")" : ""}${until}${x.reason ? " — " + esc(x.reason) : ""}</div>
+      <div class="small muted">визитка: ${x.disclosure === "open" ? "open" : "standard"}${dwho}</div>
+      <div class="btnrow" style="margin-top:8px">
+        ${x.mode !== "normal" && x.mode !== "dead" ? `<button class="btn" data-room="${esc(x.id)}" data-act="raise">↑ поднять</button>` : ""}
+        ${(x.mode === "normal" || x.mode === "observer" || x.mode === "quiet") ? `<button class="btn sec" data-room="${esc(x.id)}" data-act="lower">↓ тише</button>` : ""}
+        ${x.mode !== "frozen" && x.mode !== "dead" ? `<button class="btn danger" data-room="${esc(x.id)}" data-act="freeze">❄ заморозить</button>` : ""}
+        <button class="btn sec" data-room="${esc(x.id)}" data-act="disclosure">👁 ${x.disclosure === "open" ? "→standard" : "→open"}</button>
+      </div>
+    </div>`;
+  }).join("");
+  b.innerHTML = items || `<div class="empty">комнат пока нет</div>`;
+  b.querySelectorAll("[data-room]").forEach(btn => btn.onclick = async () => {
+    btn.disabled = true;
+    try { const res = await post("/api/panel/rooms/set", { id: btn.dataset.room, action: btn.dataset.act });
+      if (res.error) toast(res.error); else { toast(res.mode ? "режим: " + (MODE_NM[res.mode] || res.mode) : "визитка: " + res.disclosure); hap("medium"); }
+      loadRooms(); }
+    catch (e) { toast("не вышло: " + e.message); btn.disabled = false; }
+  });
+}
+
+/* ---------- Память (читалка) ---------- */
+async function loadMemory() {
+  const b = $("#b-memory"); b.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+  let m; try { m = await api("/api/panel/memory"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const life = m.life || null, form = life && life.formation || {}, last = form.last_run || null;
+  const streams = life && life.streams || [];
+  const lifeCard = life ? `<div class="card"><h3>Журнал жизни</h3>
+    <div class="stat-grid">
+      <div><b>${esc(life.events || 0)}</b><span>events</span></div>
+      <div><b>${esc(life.compacts || 0)}</b><span>compacts</span></div>
+      <div><b>${esc(life.episodes || 0)}</b><span>episodes</span></div>
+      <div><b>${esc(form.claims || 0)}</b><span>claims</span></div>
+    </div>
+    <div class="small muted" style="margin-top:8px">hot ${esc(life.hot_lo)}↔${esc(life.hot_hi)} ·
+      сейчас ${esc(streams.reduce((n, s) => n + (s.hot || 0), 0)} сообщений в ${esc(streams.length)} потоках ·
+      recall: ${esc(life.recall_mode || "—")}</div>
+    ${last ? `<div class="list-item" style="margin-top:8px"><b>${esc(last.id)}</b><br>
+      <span class="small">${esc(last.passes)} проходов · +${esc(last.changes)} · ${esc(last.usage || "—")}</span><br>
+      <span class="small muted">остановилась: ${esc(last.stop_reason || "—")} · покрытие ${esc(last.coverage || "—")}</span></div>` :
+      `<div class="small muted" style="margin-top:8px">ReflectionRun ещё не проходил.</div>`}
+    ${form.request ? `<div class="small" style="margin-top:8px">Запрос уже ждёт: ${esc(form.request.depth)}</div>` :
+      `<div class="btnrow"><button class="btn sec" data-form="light">лёгкое формирование</button>
+       <button class="btn" data-form="full">копать полно</button></div>`}
+    <div class="small muted" style="margin-top:7px">Кнопка ставит запрос; думает основной процесс Праксис вне живого ответа.</div>
+  </div>` : "";
+  b.innerHTML = lifeCard + (m.sections || []).map(s => `
+    <div class="card"><h3>${esc(s.title)} (${s.items.length})</h3>` + s.items.map(i => `
+      <div class="list-item" data-doc="${esc(i.path)}">
+        <div style="display:flex;gap:8px"><b style="flex:1">${esc(i.name)}</b>
+          <span class="small muted">${esc(i.mtime)} · ${fmtSize(i.size)}</span></div>
+      </div>`).join("") + `</div>`).join("") || `<div class="empty">пусто</div>`;
+  b.querySelectorAll("[data-doc]").forEach(el => el.onclick = () => openDoc(el.dataset.doc));
+  b.querySelectorAll("[data-form]").forEach(btn => btn.onclick = async () => {
+    btn.disabled = true;
+    try { const r = await post("/api/panel/memory/form", { depth: btn.dataset.form });
+      if (r.error) toast(r.error); else { toast("запрос формирования поставлен"); hap("medium"); loadMemory(); } }
+    catch (e) { toast("не вышло: " + e.message); btn.disabled = false; }
+  });
+}
+function openDoc(path) {
+  open("doc", async () => {
+    $("#doctitle").textContent = path;
+    const b = $("#b-doc"); b.innerHTML = `<div class="skel"></div>`;
+    try { const d = await api("/api/panel/memory/read?path=" + encodeURIComponent(path));
+      b.innerHTML = `<div class="small muted" style="padding:2px 2px 8px">обновлён ${esc(d.mtime)}</div>
+        <div class="card"><div class="small" style="white-space:pre-wrap">${esc(d.text)}</div></div>`;
+    } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  });
+}
+
+/* ---------- Действия ---------- */
+const AKIND = { shell: ["🖐", "shell"], blocked: ["🛑", "блок"], commit: ["🌱", "коммит"],
+  restart: ["🔄", "рестарт"], room: ["🚪", "комната"], admit: ["🤝", "впуск"], skill: ["📚", "скилл"] };
+let aFilter = "";
+async function loadActions() {
+  const b = $("#b-actions"); b.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+  let a; try { a = await api("/api/panel/actions"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const items = a.items || [];
+  const counts = {}; items.forEach(i => counts[i.kind] = (counts[i.kind] || 0) + 1);
+  const chips = [["", "все " + items.length]].concat(Object.keys(AKIND).filter(k => counts[k])
+    .map(k => [k, AKIND[k][1] + " " + counts[k]]));
+  const feed = items.filter(i => !aFilter || i.kind === aFilter).map(i => `
+    <div class="list-item"><div class="small"><span>${AKIND[i.kind] ? AKIND[i.kind][0] : "•"}</span>
+      <b>${AKIND[i.kind] ? AKIND[i.kind][1] : i.kind}</b>
+      <span class="muted">· ${esc(i.day)} ${esc(i.time)}</span></div>
+      <div class="mono" style="margin-top:3px;font-size:11.5px;word-break:break-all">${esc(i.text)}</div></div>`).join("");
+  b.innerHTML = `
+    <div class="chips">${chips.map(([k, l]) => `<button class="chip ${aFilter === k ? "on" : ""}" data-af="${k}">${l}</button>`).join("")}</div>
+    <div class="card">${feed || `<div class="empty">руки в покое</div>`}</div>`;
+  b.querySelectorAll("[data-af]").forEach(c => c.onclick = () => { aFilter = c.dataset.af; hap(); loadActions(); });
+}
+
+/* ---------- Контакты и отсутствие ---------- */
+async function loadContacts() {
+  const b = $("#b-contacts"); b.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+  let d; try { d = await api("/api/panel/contacts"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const st = d.state || {}, list = st.contacts || [];
+  const win = st.active
+    ? `<div class="row"><span class="k">окно активно</span><span class="v">до <b>${esc(st.until)}</b></span></div>
+       <div class="btnrow"><button class="btn danger" id="abStop" style="width:100%">Завершить сейчас</button></div>`
+    : `<div class="small muted" style="margin-bottom:8px">Таймер запускаешь только ты; длительность твоя. Пока окна нет — она живёт как обычно.</div>
+       <div class="chips">${[1, 3, 8, 24].map(h => `<button class="chip" data-abh="${h}">${h} ч</button>`).join("")}
+         <input type="text" id="abCustom" placeholder="своя, ч" style="width:84px;flex:0 0 auto"></div>
+       <div class="btnrow"><button class="btn" id="abStart" style="width:100%">Запустить окно отсутствия</button></div>`;
+  const rows = list.map(c => `
+    <div class="list-item"><div style="display:flex;gap:8px;align-items:center">
+        <b style="flex:1">${esc(c.name)}${c.family ? ` <span class="small" style="opacity:.75">· семья</span>` : ""}</b>
+        ${c.username ? `<span class="small muted">@${esc(c.username)}</span>` : ""}
+        <button class="btn danger" style="padding:5px 10px;font-size:12px" data-crm="${esc(c.slug)}">убрать</button></div>
+      <div class="btnrow" style="margin-top:6px">
+        <button class="btn sec" style="padding:6px 10px;font-size:12px" data-cnote="${esc(c.slug)}">+ заметка для неё</button>
+        ${c.family ? "" : `<button class="btn sec" style="padding:6px 10px;font-size:12px" data-cfam="${esc(c.slug)}">сделать семьёй</button>`}
+      </div>
+    </div>`).join("");
+  b.innerHTML = `
+    <div class="card"><h3>Окно отсутствия</h3>${win}</div>
+    <div class="card"><h3>Важные люди (${list.length})</h3>${rows || `<div class="muted small">список пуст</div>`}</div>
+    <div class="card"><h3>Записка на отсутствие</h3>
+      <div class="small muted" style="margin-bottom:8px">Пока идёт окно и важный человек пишет, а ответа нет —
+      она ответит <b>от своего лица</b> (не от твоего): «я Praxis, Егор офлайн, помогу / передам». Эта записка —
+      что можно сказать про твою доступность. До 3 ответов на человека за окно; о каждом сообщит тебе.</div>
+      <textarea id="schedNote" rows="3" style="width:100%;box-sizing:border-box"
+        placeholder="если срочное — скажи, что вечером на связи; про X скажи Y">${esc(st.schedule_note || "")}</textarea>
+      <div class="btnrow" style="margin-top:6px"><button class="btn" id="schedSave" style="width:100%">Сохранить записку</button></div></div>
+    <div class="card"><h3>Добавить</h3>
+      <div class="small muted">Добавление — в чате бота: кнопка «👥 Добавить важного» под полем ввода
+      открывает твои контакты (нативно), после выбора расскажи про человека — досье уйдёт ей в память.
+      Или расскажи ей в личке — она запомнит сама.</div></div>
+    <p class="small muted" style="padding:0 4px">Ответ в отсутствие отвечает важным её голосом (не имперсонация),
+    только пока идёт окно, узким контекстом (портрет + эта записка), без автономных действий — и присылает тебе каждый ответ.</p>`;
+  let hSel = 0;
+  b.querySelectorAll("[data-abh]").forEach(c => c.onclick = () => { hap();
+    b.querySelectorAll("[data-abh]").forEach(x => x.classList.remove("on"));
+    c.classList.add("on"); hSel = +c.dataset.abh; $("#abCustom").value = ""; });
+  if ($("#abStart")) $("#abStart").onclick = async () => {
+    const h = parseFloat($("#abCustom").value.replace(",", ".")) || hSel;
+    if (!h) { toast("выбери длительность"); return; }
+    try { const r = await post("/api/panel/absence/start", { hours: h });
+      if (r.error) toast(r.error); else { toast("окно открыто до " + r.until); hap("medium"); loadContacts(); homeBadges(); } }
+    catch (e) { toast(e.message); } };
+  if ($("#abStop")) $("#abStop").onclick = async () => {
+    try { await post("/api/panel/absence/stop", {}); toast("окно закрыто"); loadContacts(); homeBadges(); }
+    catch (e) { toast(e.message); } };
+  if ($("#schedSave")) $("#schedSave").onclick = async () => {
+    try { const r = await post("/api/panel/absence/note", { note: $("#schedNote").value });
+      toast(r.error || "записка сохранена"); } catch (e) { toast(e.message); } };
+  b.querySelectorAll("[data-crm]").forEach(btn => btn.onclick = async () => {
+    try { await post("/api/panel/contacts/remove", { slug: btn.dataset.crm }); toast("убран"); loadContacts(); }
+    catch (e) { toast(e.message); } });
+  b.querySelectorAll("[data-cnote]").forEach(btn => btn.onclick = async () => {
+    const note = prompt("Заметка про человека (уйдёт в её память, private):"); if (!note) return;
+    try { const r = await post("/api/panel/contacts/note", { slug: btn.dataset.cnote, note });
+      toast(r.error || "записала в память"); } catch (e) { toast(e.message); } });
+  b.querySelectorAll("[data-cfam]").forEach(btn => btn.onclick = async () => {
+    try { const r = await post("/api/panel/contacts/family", { slug: btn.dataset.cfam });
+      toast(r.error || "теперь семья"); if (!r.error) { hap("medium"); loadContacts(); } }
+    catch (e) { toast(e.message); } });
+}
+
+/* ---------- Почта ---------- */
+async function loadMail() {
+  const b = $("#b-mail"); b.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+  let m; try { m = await api("/api/inbox"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const items = m.items || [];
+  b.innerHTML = items.length ? `<div class="card">` + items.map(i => `
+    <div class="list-item" data-letter="${esc(i.hash)}">
+      <div style="display:flex;gap:8px;align-items:center">
+        <b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(i.subject || "(без темы)")}</b>
+        <span class="pill ${esc(i.status)}">${esc(i.status)}</span></div>
+      <div class="small muted">${esc(i.from)} · ${esc(i.date)}</div>
+      <div class="small" style="margin-top:2px;color:var(--muted)">${esc(i.preview || "")}</div>
+    </div>`).join("") + `</div>
+    <p class="small muted" style="padding:0 4px"> Answer-flow: перешли письмо ей в личку — она сама сделает черновик, тебе останется Approve.</p>`
+    : `<div class="empty">ящик пуст</div>`;
+  b.querySelectorAll("[data-letter]").forEach(el => el.onclick = () => openLetter(el.dataset.letter));
+}
+async function openLetter(hash) {
+  open("letter", async () => {
+    const b = $("#b-letter"); b.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+    let e; try { e = await api("/api/letter/" + hash); } catch (err) { b.innerHTML = `<div class="empty">${esc(err.message)}</div>`; return; }
+    $("#lettertitle").textContent = e.subject || "Письмо";
+    const canDraft = e.status === "new" || !(e.draft || "").trim();
+    const canApprove = (e.draft || "").trim() && e.status !== "sent" && e.status !== "approved";
+    b.innerHTML = `
+      <div class="card"><div class="row"><span class="k">от</span><span class="v small">${esc(e.from)}</span></div>
+        <div class="row"><span class="k">дата</span><span class="v small">${esc(e.date)}</span></div>
+        <div class="row"><span class="k">статус</span><span class="v"><span class="pill ${esc(e.status)}">${esc(e.status)}</span></span></div></div>
+      <div class="card"><h3>Письмо</h3><div class="small" style="white-space:pre-wrap">${esc(e.body || "")}</div></div>
+      ${(e.draft || "").trim() ? `<div class="card"><h3>Её черновик</h3><div class="small" style="white-space:pre-wrap">${esc(e.draft)}</div></div>` : ""}
+      <div class="btnrow">
+        ${canDraft ? `<button class="btn sec" id="lDraft">✍️ Черновик от неё</button>` : ""}
+        ${canApprove ? `<button class="btn" id="lApprove">Approve — отправить</button>` : ""}
+        ${e.status !== "rejected" && e.status !== "sent" ? `<button class="btn danger" id="lReject">Отклонить</button>` : ""}
+      </div>`;
+    const act = async (path, okMsg) => { try { await post(path, {}); toast(okMsg); hap("medium"); back(); loadMail(); }
+      catch (err) { toast(err.message); } };
+    const q = sel => b.querySelector(sel);
+    if (q("#lDraft")) q("#lDraft").onclick = () => { toast("пишет…"); act("/api/compose/" + hash, "черновик готов"); };
+    if (q("#lApprove")) q("#lApprove").onclick = () => act("/api/approve/" + hash, "отправлено");
+    if (q("#lReject")) q("#lReject").onclick = () => act("/api/reject/" + hash, "отклонено");
+  });
+}
+
+/* ---------- Сервер ---------- */
+async function loadServer() {
+  const b = $("#b-server"); b.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+  let s; try { s = await api("/api/panel/server"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const mem = s.mem || {}, du = s.disk || {};
+  const memUsed = mem.total_mb ? mem.total_mb - mem.available_mb : 0;
+  const logs = Object.entries(s.logs || {}).map(([n, l]) =>
+    `<div class="row"><span class="k mono">${n}.log</span><span class="v small">${fmtAge(l.age_sec)} назад · ${l.size_kb}К</span></div>`).join("");
+  b.innerHTML = `
+    <div class="card"><h3>Машина</h3>
+      ${s.uptime_sec ? `<div class="row"><span class="k">аптайм процесса</span><span class="v mono">${fmtAge(s.uptime_sec)}</span></div>` : ""}
+      <div class="row"><span class="k">load</span><span class="v mono">${esc(s.loadavg || "?")} <span class="muted small">/ ${s.cpus || "?"} cpu</span></span></div>
+      <div class="row"><span class="k">RAM</span><span class="v">${memUsed} / ${mem.total_mb || "?"} МБ <span class="muted small">(${mem.available_mb || "?"} свободно)</span></span></div>
+      <div class="row"><span class="k">диск</span><span class="v">${du.free_gb || "?"} из ${du.total_gb || "?"} ГБ свободно</span></div></div>
+    <div class="card"><h3>Процессы (свежесть логов)</h3>${logs || `<div class="muted small">logsink молчит</div>`}</div>
+    <div class="card"><h3>Код</h3><div class="row"><span class="k">HEAD</span><span class="v mono">${esc(s.head || "?")}</span></div></div>`;
+}
+
+/* ---------- Параметры ---------- */
+let envChanges = {};
+async function loadEnv() {
+  const b = $("#b-env"); b.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+  envChanges = {};
+  let e; try { e = await api("/api/panel/env2"); } catch (err) { b.innerHTML = `<div class="empty">${esc(err.message)}</div>`; return; }
+  const groups = {};
+  (e.items || []).forEach(it => (groups[it.group] = groups[it.group] || []).push(it));
+  const order = ["Модель", "Поведение", "Лимиты", "Прочее"];
+  b.innerHTML = order.filter(g => groups[g]).map(g => `
+    <div class="card"><h3>${g}</h3>` + groups[g].map(it => `
+      <div class="list-item">
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="mono small" style="flex:1">${esc(it.key)}</span>
+          ${it.protected ? `<span class="pill gray">защищено</span>` : it.secret ? `<span class="pill gray">секрет</span>` : ""}
+        </div>
+        ${it.desc ? `<div class="small muted" style="margin:2px 0 6px">${esc(it.desc)}</div>` : ""}
+        ${(it.secret || it.protected)
+          ? `<div class="mono small muted">${esc(it.value)}</div>`
+          : `<input type="text" class="mono" data-env="${esc(it.key)}" value="${esc(it.value)}">`}
+      </div>`).join("") + `</div>`).join("")
+    + `<div id="envbar"><button class="btn" id="envPreview" style="width:100%">Проверить изменения</button></div>`;
+  if (!b.dataset.wired) {  // Ф1.6: листенер на постоянный контейнер — один раз, не копится
+    b.dataset.wired = "1";
+    b.addEventListener("input", ev => {
+      const k = ev.target.dataset && ev.target.dataset.env; if (!k) return;
+      envChanges[k] = ev.target.value; $("#envbar").classList.add("on"); });
+  }
+  $("#envPreview").onclick = async () => {
+    hap();
+    try {
+      const p = await post("/api/panel/env/preview", { changes: envChanges });
+      const rows = (p.diff || []).filter(d => d.op !== "same").map(d =>
+        `<div class="row"><span class="k mono">${esc(d.key)}</span>
+         <span class="v small"><span class="muted">${esc(d.old == null ? "—" : d.old)}</span> → <b>${esc(d.new)}</b></span></div>`).join("");
+      const errs = (p.errors || []).map(x => `<div class="small" style="color:var(--err)">${esc(x)}</div>`).join("");
+      openSheet(`<h2 style="font-size:15px">Изменения .env</h2>
+        <div class="card" style="margin-top:10px">${rows || `<div class="muted small">пусто</div>`}${errs}</div>
+        <p class="small muted">Подхват — её рестарт / docker restart. Compose-переменные (напр. PRAXIS_CONTEXT_BUDGET) — recreate.</p>
+        ${p.ok ? `<div class="btnrow"><button class="btn" id="envApply" style="width:100%">Применить</button></div>` : ""}`);
+      if ($("#envApply")) $("#envApply").onclick = async () => {
+        try { const r = await post("/api/panel/env/apply", { changes: envChanges, confirm: true });
+          if (r.ok === false) toast((r.errors || ["не применилось"])[0]);
+          else { toast("применено — скажи ей restart_self или пни docker"); hap("medium"); closeSheet(); loadEnv(); } }
+        catch (err2) { toast(err2.message); } };
+    } catch (err) { toast(err.message); } };
+}
+
+/* ---------- Мозг (PASS 8.2): llm.json — роли, фреймворки, лимиты ---------- */
+let BRAIN = null;
+const ROLE_TITLES = { voice: "Голос", evaluator: "Вспомогательная" };
+/* ---------- PASS 22: каталог мозга + наблюдаемые свойства ---------- */
+async function loadBrainCatalog() {
+  const c = $("#brainCatalog"); if (!c) return;
+  try {
+    const d = await api("/api/panel/brain/catalog");
+    const stats = d.stats || {};
+    const rows = Object.keys(stats).sort((a, b) => (stats[b].calls || 0) - (stats[a].calls || 0)).slice(0, 10).map(k => {
+      const m = stats[k]; const errs = Object.values(m.errors || {}).reduce((a, b) => a + b, 0);
+      return `<div class="row"><span class="k mono small">${esc(k)}</span>
+        <span class="v mono small">${m.calls || 0} выз · сб ${errs} · пуст ${m.empty || 0}${m.lat_ms_ema ? ` · ~${Math.round(m.lat_ms_ema / 100) / 10}с` : ""}</span></div>`; }).join("");
+    const switches = (d.switches || []).map(e => `<div class="small mono muted">${esc(String(e.ts || "").slice(5, 16).replace("T", " "))} ${esc(e.text || "")}</div>`).join("");
+    c.innerHTML = `<h3>Каталог и наблюдения</h3>
+      ${rows || `<div class="small muted">наблюдений вызовов ещё нет</div>`}
+      <div class="small muted" style="margin-top:6px">остаток провайдера: ${esc(d.provider_remaining || "unknown")}</div>
+      ${switches ? `<div style="margin-top:6px"><div class="small muted">её свитчи:</div>${switches}</div>` : ""}
+      <p class="small muted" style="margin-top:6px">Модели по ролям она меняет сама (switch_brain, с ping-рукопожатием и причиной в дневнике); ключи — только здесь, у тебя.</p>`;
+  } catch (e) { c.innerHTML = `<h3>Каталог и наблюдения</h3><div class="small muted">${esc(e.message)}</div>`; }
+}
+
+/* ---------- PASS 20: плитка «Я» — версии души, деформации, сдвиги ---------- */
+async function loadSelf() {
+  const b = $("#b-self"); b.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+  let d; try { d = await api("/api/panel/identity"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const f = d.files || {};
+  const fileCard = k => { const v = f[k] || {}; const last = v.last || null;
+    return `<div class="list-item">
+      <div style="display:flex;gap:8px;align-items:center"><b>${k}.md</b>
+        <span class="pill gray">${v.versions || 0} верс.</span>
+        <span class="small muted mono">${v.chars || 0} зн.</span></div>
+      <div class="small muted">${esc(v.layer || "")}</div>
+      ${last && last.reason ? `<div class="small muted">последняя v${last.version} (${esc(String(last.archived_at || "").slice(0, 10))}): ${esc(last.reason)}</div>` : ""}
+      ${last ? `<div class="btnrow"><button class="btn sec" data-idro="${k}:${last.version}">Откатить последний сдвиг</button></div>` : ""}
+    </div>`; };
+  b.innerHTML = `
+    <div class="card"><h3>Кто я сейчас</h3><div class="small" style="white-space:pre-wrap">${esc(d.who_now || "—")}</div></div>
+    <div class="card"><h3>Слои и версии</h3>${["SOUL", "VOICE", "self"].map(fileCard).join("")}
+      <div class="small muted" style="margin-top:6px">${esc(d.disposition || "")}</div></div>
+    <div class="card"><h3>События нагрузки (контекст, затухание 7д)</h3>${
+      (d.stress || []).length ? (d.stress || []).map(s => `<div class="row"><span class="k">${esc(s.theme)}</span><span class="v mono">${s.score} · ${s.count} соб.</span></div>`).join("") : `<div class="small muted">тихо — всё затухло</div>`}</div>
+    <div class="card"><h3>Сдвиги души</h3>${
+      (d.shifts || []).length ? (d.shifts || []).map(e => `<div class="list-item"><div class="small mono muted">${esc(String(e.ts || "").slice(0, 16).replace("T", " "))} [${esc(e.kind)}]</div><div class="small">${esc(e.text || "")}</div></div>`).join("") : `<div class="small muted">пока не было</div>`}</div>
+    <p class="small muted">Ревизии она применяет сама — с версией, причиной и git-коммитом; твой откат — право постфактум,
+    её текущий текст при этом сам ложится в архив (история не теряется). Полные тексты — «Память → Душа/Архив души».</p>`;
+  b.querySelectorAll("[data-idro]").forEach(btn => btn.onclick = () => {
+    hap();
+    const [name, ver] = btn.dataset.idro.split(":");
+    openSheet(`<h2>Откатить ${esc(name)}.md к v${esc(ver)}?</h2>
+      <p class="small muted">v${esc(ver)} — состояние до её последней ревизии. Текущий текст станет новой архивной версией.</p>
+      <div class="btnrow"><button class="btn danger" id="idroYes">Откатить</button><button class="btn sec" id="idroNo">Отмена</button></div>`);
+    $("#idroNo").onclick = closeSheet;
+    $("#idroYes").onclick = async () => {
+      try { const r = await post("/api/panel/identity/rollback", { name, version: +ver, confirm: true });
+        toast(r.ok ? "откатила — она увидит в журнале" : (r.error || "не вышло"));
+      } catch (e) { toast("ошибка: " + e.message); }
+      closeSheet(); loadSelf(); };
+  });
+}
+
+/* ---------- PASS 21: плитка «Восприятие» — рычаги + причины пропуска ---------- */
+async function loadPercept() {
+  const b = $("#b-percept"); b.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+  let p; try { p = await api("/api/panel/perception"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const SRC = { default: "дефолт", env: "env", praxis: "она", egor: "ты" };
+  b.innerHTML = `
+    <div class="card"><h3>Рычаги (живые — применяются без рестарта)</h3>${(p.knobs || []).map(k => `
+      <div class="list-item">
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="mono small" style="flex:1">${esc(k.knob)}</span>
+          <span class="pill ${k.source === "praxis" ? "approved" : k.source === "egor" ? "drafted" : "gray"}">${SRC[k.source] || esc(k.source)}</span>
+        </div>
+        <div class="small muted" style="margin:2px 0 6px">${esc(k.desc)}${k.bounds ? ` · [${k.bounds[0]}..${k.bounds[1]}]` : ""}${k.reason ? ` · «${esc(k.reason)}»` : ""}</div>
+        <div style="display:flex;gap:8px">
+          <input type="text" class="mono" data-pk="${esc(k.knob)}" value="${esc(String(k.value))}" style="flex:1">
+          <button class="btn sec" data-pset="${esc(k.knob)}">OK</button>
+          ${(k.source === "praxis" || k.source === "egor") ? `<button class="btn sec" data-preset="${esc(k.knob)}">↺</button>` : ""}
+        </div>
+      </div>`).join("")}
+      <p class="small muted">Источник честный: «она» — её решение (manage_perception), «ты» — правка отсюда, env — дефолт старта.</p></div>
+    <div class="card"><h3>Пропуски сегодня (до голоса)</h3>${Object.keys(p.skips_today || {}).length
+      ? Object.entries(p.skips_today).map(([k, v]) => `<div class="row"><span class="k">${esc(k)}</span><span class="v mono">${v}</span></div>`).join("")
+      : `<div class="small muted">не было</div>`}
+      ${(() => { const amb = Object.values(p.ambient_today || {}).reduce((a, b) => a + b, 0);
+        return amb ? `<div class="row"><span class="k">фон групп (среда, не пропуск)</span><span class="v mono">${amb}</span></div>` : ""; })()}</div>
+    <div class="card"><h3>Журнал пропусков</h3>${(p.skips || []).length ? (p.skips || []).map(r => `
+      <div class="list-item"><div class="small mono muted">${new Date(r.ts * 1000).toLocaleString("ru", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })} · ${esc(r.class)} · ${esc(r.stage)}${r.prev_n ? ` ×${1 + r.prev_n}` : ""}</div>
+      <div class="small">${esc(r.detail || "")}${r.chat ? ` · чат ${esc(r.chat)}` : ""}</div></div>`).join("") : `<div class="small muted">пусто — всё, что доходило, она видела и решала</div>`}</div>`;
+  b.querySelectorAll("[data-pset]").forEach(btn => btn.onclick = async () => {
+    hap(); const knob = btn.dataset.pset;
+    const val = b.querySelector(`[data-pk="${CSS.escape(knob)}"]`).value;
+    try { const r = await post("/api/panel/perception/set", { knob, value: val, confirm: true });
+      toast(r.ok ? `применилось: ${knob} = ${r.new}` : (r.error || "не вышло")); if (r.ok) loadPercept(); }
+    catch (e) { toast("ошибка: " + e.message); } });
+  b.querySelectorAll("[data-preset]").forEach(btn => btn.onclick = async () => {
+    hap(); const knob = btn.dataset.preset;
+    try { const r = await post("/api/panel/perception/set", { knob, reset: true, confirm: true });
+      toast(r.ok ? "сброшено к дефолту" : (r.error || "не вышло")); if (r.ok) loadPercept(); }
+    catch (e) { toast("ошибка: " + e.message); } });
+}
+
+async function loadBrain() {
+  const b = $("#b-brain"); b.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+  let d; try { d = await api("/api/panel/llm"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  BRAIN = d;
+  const modelOpts = fw => (d.model_options && d.model_options[fw]) || [];
+  const modelList = (id, fw, current) => {
+    const vals = modelOpts(fw).slice();
+    if (current && !vals.includes(current)) vals.push(current);
+    return `<datalist id="${id}">${vals.map(x => `<option value="${esc(x)}"></option>`).join("")}</datalist>`;
+  };
+  const roleCard = role => { const r = d.roles[role] || {};
+    const otherFw = r.framework === "anthropic" ? "openai" : "anthropic";
+    return `<div class="card" data-role="${role}">
+      <h3>${ROLE_TITLES[role]}${r.on_fallback ? ' <span class="pill drafted">⚠ на фолбэке</span>' : ""}${r.fallback_armed ? ' <span class="pill approved">фолбэк готов</span>' : ""}</h3>
+      <div class="chips" style="margin-top:2px">${["anthropic", "openai"].map(f =>
+        `<button class="chip ${r.framework === f ? "on" : ""}" data-bfw="${role}:${f}">${f}</button>`).join("")}</div>
+      <div class="small muted">модель</div>
+      <input type="text" class="mono" data-bf="${role}:model" list="bmodels-${role}" value="${esc(r.model || "")}">
+      ${modelList(`bmodels-${role}`, r.framework, r.model || "")}
+      <div class="small muted" style="margin-top:6px">фолбэк-модель (на противоположном фреймворке; пусто — без фолбэка)</div>
+      <input type="text" class="mono" data-bf="${role}:fallback_model" list="bfallback-${role}" value="${esc(r.fallback_model || "")}">
+      ${modelList(`bfallback-${role}`, otherFw, r.fallback_model || "")}
+      <div class="small muted" style="margin-top:6px">max_tokens</div>
+      <input type="text" class="mono" data-bf="${role}:max_tokens" value="${esc(r.max_tokens || "")}" inputmode="numeric">
+      <div class="btnrow" style="align-items:center">
+        <button class="btn sec" data-bping="${role}">Проверить</button>
+        <span class="small" id="bping-${role}">${r.last_error ? `<span style="color:var(--err)">●</span> ${esc(r.last_error)}` : ""}</span>
+      </div>
+    </div>`; };
+  const fwCard = fw => { const f = d.frameworks[fw] || {};
+    return `<div class="list-item">
+      <div style="display:flex;gap:8px;align-items:center"><b>${fw}</b>
+        ${f.has_key ? `<span class="pill approved">ключ есть</span>` : `<span class="pill gray">без ключа</span>`}</div>
+      <div class="small muted" style="margin:6px 0 2px">base_url</div>
+      <input type="text" class="mono" data-bfw2="${fw}:base_url" value="${esc(f.base_url || "")}">
+      <div class="small muted" style="margin:6px 0 2px">API-ключ (write-only; пусто — не менять)</div>
+      <input type="password" class="mono" data-bfw2="${fw}:api_key" value="" placeholder="${esc(f.key_mask || "не задан")}" autocomplete="new-password">
+    </div>`; };
+  const lim = d.limits || {};
+  b.innerHTML = roleCard("voice") + roleCard("evaluator") + `
+    <div class="card"><h3>Фреймворки</h3>${fwCard("anthropic")}${fwCard("openai")}</div>
+    <div class="card"><h3>Ресурсные бюджеты</h3>
+      <div class="row"><span class="k">bounded aux/worker (итераций)</span><span class="v mono" id="bIterVal">${esc(lim.max_tool_iters || 20)}</span></div>
+      <input type="range" id="bIters" min="1" max="600" step="1" value="${esc(lim.max_tool_iters || 20)}" style="width:100%">
+      <div class="small muted" style="margin-top:8px">Основной tool-loop не ограничен этим числом. Outbound checker проверяет только полномочие раскрыть данные и не редактирует речь. Автономный pulse — раз в час без дневного капа.</div>
+    </div>
+    <div class="card" id="brainUsage"><h3>Расход</h3><div class="skel"></div></div>
+    <div class="card" id="brainAppetite"><h3>Аппетит</h3><div class="skel"></div></div>
+    <div class="card" id="brainCatalog"><h3>Каталог и наблюдения</h3><div class="skel"></div></div>
+    <div class="btnrow">
+      <button class="btn" id="brainApply" style="flex:1">Применить</button>
+      <button class="btn danger" id="brainRestart">Перезапустить Praxis</button>
+    </div>
+    <p class="small muted">Конфиг живёт в memory/llm.json (не в .env и не в git). Подхват горячий — по mtime;
+    рестарт нужен только для чистоты (пересоздание клиентов SDK). В списке есть принимаемые relay slug:
+    gpt-5.6-sol, gpt-5.6-terra и gpt-5.6-luna; «Проверить» честно покажет доступ текущей авторизации.</p>`;
+  loadBrainUsage();
+  loadAppetite();
+  loadBrainCatalog();
+  const refreshModelLists = role => {
+    const fwEl = b.querySelector(`[data-bfw^="${role}:"].on`);
+    const fw = fwEl ? fwEl.dataset.bfw.split(":")[1] : ((d.roles[role] || {}).framework || "openai");
+    const other = fw === "anthropic" ? "openai" : "anthropic";
+    const fill = (id, vals) => { const el = $(id); if (el) el.innerHTML = vals.map(x => `<option value="${esc(x)}"></option>`).join(""); };
+    fill(`#bmodels-${role}`, modelOpts(fw));
+    fill(`#bfallback-${role}`, modelOpts(other));
+  };
+  $("#bIters").oninput = () => { $("#bIterVal").textContent = $("#bIters").value; };
+  b.querySelectorAll("[data-bfw]").forEach(el => el.onclick = () => { hap();
+    const [role, fw] = el.dataset.bfw.split(":");
+    const prevEl = b.querySelector(`[data-bfw^="${role}:"].on`);
+    const prevFw = prevEl ? prevEl.dataset.bfw.split(":")[1] : null;
+    b.querySelectorAll(`[data-bfw^="${role}:"]`).forEach(x => x.classList.remove("on"));
+    el.classList.add("on");
+    // переключение фреймворка: модель и фолбэк-модель — по конвенции chat() модели
+    // противоположных фреймворков, так что при смене они меняются местами (свап только если
+    // реально сменили фреймворк и есть что свапать — иначе оставляем как есть, правь руками)
+    if (prevFw && prevFw !== fw) {
+      const modelEl = b.querySelector(`[data-bf="${role}:model"]`);
+      const fbEl = b.querySelector(`[data-bf="${role}:fallback_model"]`);
+      if (modelEl && fbEl && fbEl.value.trim()) {
+        const tmp = modelEl.value; modelEl.value = fbEl.value; fbEl.value = tmp;
+      }
+    }
+    refreshModelLists(role); });
+  b.querySelectorAll("[data-bping]").forEach(el => el.onclick = async () => { hap();
+    const role = el.dataset.bping, out = $("#bping-" + role);
+    out.innerHTML = `<span class="muted">проверяю…</span>`; el.disabled = true;
+    try { const r = await post("/api/panel/llm/ping", { role });
+      out.innerHTML = r.ok ? `<span style="color:var(--ok)">●</span> живой`
+        : `<span style="color:var(--err)">●</span> ${esc(r.error || "мёртв")}`; }
+    catch (e) { out.innerHTML = `<span style="color:var(--err)">●</span> ${esc(e.message)}`; }
+    el.disabled = false; });
+  $("#brainApply").onclick = brainApply;
+  $("#brainRestart").onclick = () => {
+    openSheet(`<h2 style="font-size:15px">Перезапустить Praxis?</h2>
+      <p class="small muted">Мягкий рестарт: часы подхватят запрос (~5с), bootguard поднимет на текущем коде.
+      Память на диске не тронется.</p>
+      <div class="btnrow"><button class="btn danger" id="brainRestartGo" style="width:100%">Да, перезапустить</button></div>`);
+    $("#brainRestartGo").onclick = async () => { hap("medium");
+      try { const r = await post("/api/panel/restart", { reason: "кнопка в плитке «Мозг»" });
+        toast(r.note || "запрошено"); closeSheet(); }
+      catch (e) { toast(e.message); } }; };
+}
+async function loadBrainUsage() {
+  const box = $("#brainUsage"); if (!box) return;
+  let u; try { u = await api("/api/panel/llm/usage"); }
+  catch (e) { box.innerHTML = `<h3>Расход</h3><div class="muted small">${esc(e.message)}</div>`; return; }
+  const days = Object.keys(u.days || {}).sort();
+  if (!days.length) { box.innerHTML = `<h3>Расход</h3><div class="muted small">данных ещё нет — счётчик копится с PASS 9</div>`; return; }
+  const kk = v => v >= 1e6 ? (v / 1e6).toFixed(1) + "М" : v >= 1000 ? (v / 1000).toFixed(1) + "к" : String(v);
+  const today = new Date().toISOString().slice(0, 10);
+  const roleRu = { voice: "голос", evaluator: "вспомогательная" };
+  const dayRow = day => {
+    const roles = u.days[day] || {};
+    const cells = ["voice", "evaluator"].map(r => { const d = roles[r];
+      if (!d || !d.calls) return "";
+      const money = u.priced && u.cost[day] && u.cost[day][r] != null ? ` · $${u.cost[day][r].toFixed(2)}` : "";
+      const fb = d.fallback ? ` · фб ${d.fallback}` : "";
+      return `<div class="small">${roleRu[r]}: ${kk(d.in)}→${kk(d.out)} (${d.calls} выз.${fb})${money}</div>`; }).join("");
+    return `<div class="list-item"><div class="small ${day === today ? "" : "muted"}"><b>${day === today ? "сегодня" : esc(day.slice(5))}</b></div>${cells || `<div class="small muted">тихо</div>`}</div>`;
+  };
+  // суммы за неделю
+  const tot = {};
+  days.forEach(day => Object.entries(u.days[day] || {}).forEach(([r, d]) => {
+    const t = tot[r] = tot[r] || { in: 0, out: 0, calls: 0 };
+    t.in += d.in || 0; t.out += d.out || 0; t.calls += d.calls || 0; }));
+  const totLine = Object.entries(tot).map(([r, t]) => `${roleRu[r] || r}: ${kk(t.in)}→${kk(t.out)} · ${t.calls} выз.`).join(" · ");
+  box.innerHTML = `<h3>Расход</h3>
+    <div class="small muted" style="margin-bottom:6px">за 7 дней: ${totLine}${u.priced ? "" : " · цены не заданы — только токены (pricing в llm.json)"}</div>
+    ${days.slice().reverse().map(dayRow).join("")}`;
+}
+async function loadAppetite() {
+  const box = $("#brainAppetite"); if (!box) return;
+  let a; try { a = await api("/api/panel/appetite"); }
+  catch (e) { box.innerHTML = `<h3>Аппетит</h3><div class="muted small">${esc(e.message)}</div>`; return; }
+  const kk = v => v >= 1e6 ? (v / 1e6).toFixed(1) + "М" : v >= 1000 ? (v / 1000).toFixed(1) + "к" : String(v);
+  const obs = a.observed || {};
+  const req = a.owner_request, interp = a.interpretation, plan = (interp || {}).plan || {};
+  const prom = a.promise || {}, hasProm = Object.values(prom).some(v => v != null);
+  const fresh = req && (!interp || (req.ts || 0) > (interp.ts || 0));
+  const kindRu = { free: "не экономь", considerate: "умерь аппетиты", pause_background: "останови фон", pledge: "числовая", text: "своими словами" };
+  const rows = [];
+  rows.push(`<div class="row"><span class="k">режим</span><span class="v mono">${esc(a.mode)}</span></div>`);
+  if (a.background_hold) rows.push(`<div class="small" style="color:var(--warn,#e6a23c)">⏸ ${esc(a.background_hold)}</div>`);
+  if (req) rows.push(`<div class="small ${fresh ? "" : "muted"}">просьба Егора (${esc(req.source || "?")}): ${esc(req.raw || kindRu[req.kind] || req.kind)}${fresh ? " · <b>ждёт её толкования</b>" : ""}</div>`);
+  if (interp) rows.push(`<div class="small muted">её толкование: ${esc(interp.text || "—")} (окна: ${plan.windows === false ? "нет" : "да"} · сон: ${esc(plan.sleep_depth || "full")})</div>`);
+  if (hasProm) {
+    const pcs = [];
+    if (prom.daily_tokens != null) pcs.push(`${kk(obs.tokens_today || 0)} / ${kk(prom.daily_tokens)} ток`);
+    if (prom.daily_cost != null) pcs.push(`$${obs.estimated_cost_today != null ? obs.estimated_cost_today.toFixed(2) : "?"} / $${prom.daily_cost}`);
+    if (prom.background_calls != null) pcs.push(`фон ≤${prom.background_calls}`);
+    rows.push(`<div class="small">обещание: ${pcs.join(" · ")}</div>`);
+    if (a.promise_check) rows.push(`<div class="small" style="color:var(--err)">⚠ ${esc(a.promise_check)}</div>`);
+  }
+  rows.push(`<div class="small muted">сегодня: ${kk(obs.tokens_today || 0)} ток (${obs.calls_today || 0} выз.)${obs.estimated_cost_today != null ? ` · ≈$${obs.estimated_cost_today.toFixed(2)}` : ""} · остаток провайдера: ${esc(obs.provider_remaining || "unknown")}</div>`);
+  if (a.external_provider_boundary && a.external_provider_boundary !== "absent")
+    rows.push(`<div class="small muted">внешний лимит провайдера: ${esc(a.external_provider_boundary)} (граница Егора, не её)</div>`);
+  if (a.denials_today) rows.push(`<div class="small muted">отказов рельсов сегодня: ${a.denials_today} (память/.state/denials.jsonl)</div>`);
+  box.innerHTML = `<h3>Аппетит</h3>${rows.join("")}
+    <div class="chips" style="margin-top:8px">
+      <button class="chip" data-appk="free">не экономь</button>
+      <button class="chip" data-appk="considerate">умерь аппетиты</button>
+      <button class="chip" data-appk="pause_background">останови фон</button>
+    </div>
+    <div style="display:flex;gap:6px;margin-top:8px">
+      <input type="text" id="appText" placeholder="своими словами — она истолкует" style="flex:1">
+      <button class="btn sec" id="appSend">→</button>
+    </div>
+    <p class="small muted" style="margin-top:6px">это твоё слово — она увидит его в STATE и ответит manage_appetite;
+    код не решает за неё (договор: memory/appetite.md)</p>`;
+  const sendIntent = async (kind, text) => { hap();
+    try { const r = await post("/api/panel/appetite/intent", { kind, text: text || "" });
+      if (r.ok === false) { toast(r.error || "не записалось"); return; }
+      toast("записано — она увидит на ближайшем ходе"); hap("medium"); loadAppetite(); }
+    catch (e) { toast(e.message); } };
+  box.querySelectorAll("[data-appk]").forEach(el => el.onclick = () => sendIntent(el.dataset.appk, ""));
+  $("#appSend").onclick = () => { const t = $("#appText").value.trim();
+    if (!t) { toast("пустая просьба"); return; } sendIntent("text", t); };
+}
+function brainCollect() {
+  const b = $("#b-brain"), changes = { roles: {}, frameworks: {}, limits: {} }, diff = [];
+  ["voice", "evaluator"].forEach(role => {
+    const r0 = BRAIN.roles[role] || {}, out = {};
+    const fwEl = b.querySelector(`[data-bfw^="${role}:"].on`);
+    const fw = fwEl ? fwEl.dataset.bfw.split(":")[1] : r0.framework;
+    if (fw !== r0.framework) { out.framework = fw; diff.push(`${ROLE_TITLES[role]}: фреймворк ${r0.framework} → ${fw}`); }
+    b.querySelectorAll(`[data-bf^="${role}:"]`).forEach(inp => {
+      const k = inp.dataset.bf.split(":")[1], v = inp.value.trim();
+      if (String(v) !== String(r0[k] == null ? "" : r0[k])) { out[k] = v;
+        diff.push(`${ROLE_TITLES[role]}: ${k} ${r0[k] || "—"} → ${v || "—"}`); } });
+    if (Object.keys(out).length) changes.roles[role] = out;
+  });
+  ["anthropic", "openai"].forEach(fw => {
+    const f0 = BRAIN.frameworks[fw] || {}, out = {};
+    b.querySelectorAll(`[data-bfw2^="${fw}:"]`).forEach(inp => {
+      const k = inp.dataset.bfw2.split(":")[1], v = inp.value.trim();
+      if (k === "api_key") { if (v) { out.api_key = v; diff.push(`${fw}: новый API-ключ (••••${v.slice(-4)})`); } }
+      else if (v !== (f0[k] || "")) { out[k] = v; diff.push(`${fw}: ${k} → ${v}`); } });
+    if (Object.keys(out).length) changes.frameworks[fw] = out;
+  });
+  const lim0 = BRAIN.limits || {}, iters = parseInt($("#bIters").value, 10);
+  if (iters !== Number(lim0.max_tool_iters)) { changes.limits.max_tool_iters = iters;
+    diff.push(`тул-бюджет: ${lim0.max_tool_iters} → ${iters}`); }
+  ["roles", "frameworks", "limits"].forEach(k => { if (!Object.keys(changes[k]).length) delete changes[k]; });
+  return { changes, diff };
+}
+async function brainApply() {
+  hap();
+  const { changes, diff } = brainCollect();
+  if (!diff.length) { toast("изменений нет"); return; }
+  openSheet(`<h2 style="font-size:15px">Изменения мозга</h2>
+    <div class="card" style="margin-top:10px">${diff.map(x => `<div class="small">${esc(x)}</div>`).join("")}</div>
+    <p class="small muted">Подхват горячий (mtime); она увидит смену мозга строкой в дневнике.</p>
+    <div class="btnrow"><button class="btn" id="brainGo" style="width:100%">Применить</button></div>`);
+  $("#brainGo").onclick = async () => {
+    try { const r = await post("/api/panel/llm/apply", { changes, confirm: true });
+      if (r.ok === false) { toast((r.errors || ["не применилось"])[0]); return; }
+      toast("применено"); hap("medium"); closeSheet(); loadBrain(); homeBadges(); }
+    catch (e) { toast(e.message); } };
+}
+
+/* ---------- Коммиты ---------- */
+const PROP_MARK = { proposed: "🟡 ждёт", merged: "🟢 смёржено", rejected: "🔴 отклонено", building: "⚪ строится" };
+async function loadProps() {
+  const b = $("#b-props"); b.innerHTML = `<div class="skel"></div>`;
+  let d; try { d = await api("/api/panel/proposals"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const items = (d.items || []);
+  if (!items.length) { b.innerHTML = `<div class="empty">Предложений ещё не было.<br><span class="small muted">Она открывает их сама: start_proposal → правки → submit_proposal.</span></div>`; return; }
+  b.innerHTML = items.map(p => `
+    <div class="list-item" data-prop="${esc(p.id)}">
+      <div>${PROP_MARK[p.status] || esc(p.status)} <b>${esc(p.title || p.why || p.id)}</b></div>
+      <div class="small muted">${esc(p.diffstat || "без диффа")} · тесты: ${p.tests_ok ? "✅" : "❌"}${p.zone === "protected" ? " · ⚠️ защищённая зона" : ""}${p.reason ? " · " + esc(p.reason) : ""}</div>
+    </div>`).join("");
+  b.querySelectorAll("[data-prop]").forEach(el => el.onclick = () => openProp(el.dataset.prop));
+}
+function diffHtml(t) {
+  return (t || "").split("\n").map(l => {
+    const e = esc(l);
+    if (l.startsWith("+") && !l.startsWith("+++")) return `<span class="diffline diffadd">${e}</span>`;
+    if (l.startsWith("-") && !l.startsWith("---")) return `<span class="diffline diffdel">${e}</span>`;
+    if (l.startsWith("@@") || l.startsWith("diff ") || l.startsWith("index ")) return `<span class="diffline diffmeta">${e}</span>`;
+    return `<span class="diffline">${e}</span>`;
+  }).join("");
+}
+async function openProp(pid) {
+  open("prop", async () => {
+    const b = $("#b-prop"); b.innerHTML = `<div class="skel"></div>`;
+    let p; try { p = await api("/api/panel/proposal/" + pid); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    $("#proptitle").textContent = "#" + p.id;
+    const tests = p.tests || {};
+    const act = p.status === "proposed" ? `
+      <div class="card"><h3>Решение</h3>
+        <input type="text" id="propReason" placeholder="причина (для отказа; уйдёт ей в дневник)">
+        <div class="btnrow">
+          <button class="btn" id="propApply">✅ Мёрж</button>
+          <button class="btn danger" id="propReject">❌ Отклонить</button>
+        </div></div>` : "";
+    b.innerHTML = `
+      <div class="card">
+        <h3>${esc(p.title || "без названия")} · ${PROP_MARK[p.status] || esc(p.status)}</h3>
+        <div class="small">${esc(p.why || "—")}</div>
+        <div class="small muted" style="margin-top:6px">${esc((p.files || []).join(", ") || "—")}<br>
+          ${esc(p.diffstat || "")} · зона: ${esc(p.zone || "—")}${p.decided_by ? " · решил: " + esc(p.decided_by) : ""}${p.reason ? " · " + esc(p.reason) : ""}</div>
+        <div class="small" style="margin-top:6px">${tests.ok ? "✅" : "❌"} ${esc((tests.summary || "тесты не гонялись").split("\n")[0])}</div>
+      </div>
+      ${act}
+      <div class="card"><h3>Дифф</h3><div class="mono small" style="overflow-x:auto">${diffHtml(p.diff)}</div></div>`;
+    if (p.status !== "proposed") return;
+    $("#propApply").onclick = async () => {
+      $("#propApply").disabled = true;
+      try { const r = await post("/api/panel/proposal/" + pid + "/apply", {});
+        if (r.ok) { toast("смёржено — перезапустится"); hap("medium"); back(); loadProps(); }
+        else toast(r.msg || r.error || "не вышло"); }
+      catch (e) { toast("не вышло: " + e.message); }
+      $("#propApply").disabled = false; };
+    $("#propReject").onclick = async () => {
+      $("#propReject").disabled = true;
+      try { const r = await post("/api/panel/proposal/" + pid + "/reject", { reason: $("#propReason").value.trim() });
+        if (r.ok) { toast("отклонено — она увидит причину"); hap("medium"); back(); loadProps(); }
+        else toast(r.msg || r.error || "не вышло"); }
+      catch (e) { toast("не вышло: " + e.message); }
+      $("#propReject").disabled = false; };
+  });
+}
+async function loadCommits() {
+  const b = $("#b-commits"); b.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+  let c; try { c = await api("/api/panel/commits"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  b.innerHTML = `<div class="card">` + (c.items || []).map(i => `
+    <div class="list-item" data-commit="${esc(i.hash)}">
+      <div>${esc(i.subject)}</div>
+      <div class="small muted"><span class="mono">${esc(i.hash)}</span> · ${esc(i.author)} · ${esc(i.date)}${i.stat ? " · " + esc(i.stat) : ""}</div>
+    </div>`).join("") + `</div>`;
+  b.querySelectorAll("[data-commit]").forEach(el => el.onclick = () => openCommit(el.dataset.commit));
+}
+function colorPatch(patch) {
+  return esc(patch).split("\n").map(l =>
+    l.startsWith("+") && !l.startsWith("+++") ? `<span class="add">${l}</span>` :
+    l.startsWith("-") && !l.startsWith("---") ? `<span class="del">${l}</span>` :
+    l.startsWith("@@") ? `<span class="hunk">${l}</span>` : l).join("\n");
+}
+function openCommit(hash) {
+  open("commit", async () => {
+    $("#committitle").textContent = hash;
+    const b = $("#b-commit"); b.innerHTML = `<div class="skel"></div>`;
+    try { const c = await api("/api/panel/commit/" + hash);
+      b.innerHTML = `<div class="card"><div>${esc(c.subject)}</div>
+        <div class="small muted">${esc(c.author)} · ${esc(c.date)}</div>
+        ${c.body ? `<div class="small" style="margin-top:6px;white-space:pre-wrap">${esc(c.body)}</div>` : ""}</div>
+        <pre class="code">${colorPatch(c.patch || "")}</pre>`;
+    } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  });
+}
+
+/* ---------- Скиллы ---------- */
+async function loadSkills() {
+  const b = $("#b-skills"); b.innerHTML = `<div class="skel"></div>`;
+  let s; try { s = await api("/api/panel/skills"); } catch (e) { b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const r = s.retrieval || {};
+  const note = r.note || (r.mode ? `recall: ${r.mode}` : "");
+  b.innerHTML = (note ? `<p class="small muted" style="padding:0 4px">${esc(note)}</p>` : "") +
+    `<div class="card">` + (s.items || []).map(i => `
+    <div class="list-item" data-skill="${esc(i.path)}">
+      <div>${esc(i.title)} ${i.is_index ? `<span class="pill gray">индекс</span>` : ""}</div>
+      <div class="small muted">${esc(i.summary || "")}</div>
+    </div>`).join("") + `</div>`;
+  b.querySelectorAll("[data-skill]").forEach(el => el.onclick = () => openNode(el.dataset.skill));
+}
+
+/* ---------- Логи ---------- */
+let curLog = "praxis";
+async function loadLogs(name) {
+  curLog = name || curLog;
+  const b = $("#b-logs");
+  b.innerHTML = `<div class="chips">` + ["praxis", "mailbot", "boot"].map(n =>
+    `<button class="chip ${n === curLog ? "on" : ""}" data-log="${n}">${n}</button>`).join("") +
+    `</div><div class="skel"></div>`;
+  b.querySelectorAll("[data-log]").forEach(c => c.onclick = () => { hap(); loadLogs(c.dataset.log); });
+  try { const l = await api("/api/panel/logs/" + curLog);
+    b.insertAdjacentHTML("beforeend",
+      l.note ? `<div class="empty">${esc(l.note)}</div>` : `<pre class="code">${esc((l.lines || []).join("\n"))}</pre>`);
+    b.querySelector(".skel").remove();
+    const pre = b.querySelector("pre"); if (pre) pre.scrollTop = pre.scrollHeight;
+  } catch (e) { b.querySelector(".skel").outerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+</script>
+</body>
+</html>

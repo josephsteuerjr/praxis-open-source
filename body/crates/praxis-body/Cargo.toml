@@ -1,0 +1,40 @@
+[package]
+name = "praxis-body"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Brainless Windows execution body for the server-side Praxis agent"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+http.workspace = true
+mime_guess.workspace = true
+png.workspace = true
+praxis-body-protocol = { path = "../praxis-protocol" }
+reqwest.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Win32_System_Com и Win32_UI_Accessibility нужны ровно одному файлу — src/uia.rs, где
+# живёт чтение окна текстом. Ветки набора возможностей `windows` складываются, поэтому
+# общий список в корневом Cargo.toml трогать не пришлось: COM входит в тело здесь и
+# только здесь, и это видно прямо в манифесте зависимостей крейта.
+windows = { workspace = true, features = ["Win32_System_Com", "Win32_UI_Accessibility"] }
+
+[target.'cfg(not(windows))'.dependencies]
+libc.workspace = true

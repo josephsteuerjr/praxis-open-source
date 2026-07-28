@@ -1,0 +1,14 @@
+{
+  "device_id": "windows-pc",
+  "bridge_ws_url": "wss://praxis.example.invalid/body",
+  "artifact_base_url": "https://praxis.example.invalid/body",
+  "dial_addresses": [],
+  "token": "replace-by-enrollment-or-PRAXIS_BODY_TOKEN",
+  "state_dir": "C:\\Users\\you\\AppData\\Local\\Praxis\\Body",
+  "artifact_chunk_size": 4194304,
+  "system_router_pipe": "\\\\.\\pipe\\PraxisBodySystem",
+  "system_router_token": "",
+  "interactive_router_pipe": "\\\\.\\pipe\\PraxisBodyInteractive",
+  "interactive_router_token": "",
+  "interactive_user_sid": ""
+}

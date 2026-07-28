@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ru" data-theme="atlas">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<title>ATLAS // observatory</title>
+<meta name="theme-color" content="#07090d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ATLAS">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="referrer" content="no-referrer">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/s/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/s/icon-192.png">
+<link rel="stylesheet" href="/s/atlas.css?v=5">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+<canvas id="bg" aria-hidden="true"></canvas>
+<div id="scan" aria-hidden="true"></div>
+<div id="vignette" aria-hidden="true"></div>
+
+<div id="boot">
+  <div class="boot-brand">ATLAS</div>
+  <div class="boot-sub">observatory · establishing owner link</div>
+  <div class="boot-bar"><i></i></div>
+  <pre class="boot-log" id="bootlog"></pre>
+</div>
+
+<div id="gate" hidden>
+  <div class="gate-card">
+    <div class="gate-mark">⛓ ATLAS</div>
+    <h1 id="gateTitle">Связать устройство</h1>
+    <p id="gateMsg">Вставь ссылку связи (она содержит ключ этого устройства) — или открой Обсерваторию кнопкой в Telegram.</p>
+    <input id="gateLink" class="gate-input" type="text" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="https://srv…/#s=…">
+    <div class="gate-actions">
+      <button id="gateLinkBtn" class="btn">Связать</button>
+      <button id="gatePaste" class="btn ghost">Вставить из буфера</button>
+    </div>
+    <div id="gateErr" class="gate-err" hidden></div>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <header id="topbar">
+    <div class="tb-left">
+      <span class="tb-mark">⛓ ATLAS</span>
+      <span class="tb-host" id="tbHost">—</span>
+    </div>
+    <div class="tb-mid">
+      <span class="mini" id="miniCpu"><b>CPU</b><em>—</em></span>
+      <span class="mini" id="miniMem"><b>MEM</b><em>—</em></span>
+      <span class="mini" id="miniLoad"><b>LD</b><em>—</em></span>
+    </div>
+    <div class="tb-right">
+      <span class="tb-clock" id="tbClock">--:--:--</span>
+      <span class="tb-sess" id="tbSess" title="статус линка">◇ LINK</span>
+    </div>
+  </header>
+
+  <nav id="rail">
+    <a data-sec="vitals" class="on"><i>01</i><b>VITALS</b></a>
+    <a data-sec="containers"><i>02</i><b>CONTAINERS</b></a>
+    <a data-sec="topology"><i>03</i><b>TOPOLOGY</b></a>
+    <a data-sec="storage"><i>04</i><b>STORAGE</b></a>
+    <a data-sec="ports"><i>05</i><b>PORTS</b></a>
+    <a data-sec="proc"><i>06</i><b>PROCESS</b></a>
+    <a data-sec="stack"><i>07</i><b>STACK</b></a>
+    <a data-sec="access"><i>08</i><b>ACCESS</b></a>
+  </nav>
+
+  <main id="stage">
+    <section data-sec="vitals" class="on"></section>
+    <section data-sec="containers"></section>
+    <section data-sec="topology"></section>
+    <section data-sec="storage"></section>
+    <section data-sec="ports"></section>
+    <section data-sec="proc"></section>
+    <section data-sec="stack"></section>
+    <section data-sec="access"></section>
+  </main>
+
+  <footer id="ticker"><div class="tk-track" id="tkTrack"></div></footer>
+</div>
+
+<script src="/s/atlas.js?v=5"></script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Praxis">
+  <defs>
+    <radialGradient id="core" cx="27%" cy="18%" r="90%">
+      <stop stop-color="#b9adff"/>
+      <stop offset=".48" stop-color="#6d58ef"/>
+      <stop offset="1" stop-color="#1d2867"/>
+    </radialGradient>
+    <radialGradient id="bg" cx="18%" cy="12%" r="120%">
+      <stop stop-color="#25284a"/>
+      <stop offset=".55" stop-color="#0d1120"/>
+      <stop offset="1" stop-color="#07090f"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="128" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="166" fill="url(#core)" stroke="#d4ceff" stroke-opacity=".46" stroke-width="8"/>
+  <circle cx="256" cy="256" r="99" fill="none" stroke="#fbfaff" stroke-opacity=".9" stroke-width="13"/>
+  <circle cx="256" cy="256" r="30" fill="#fff"/>
+  <circle cx="156" cy="142" r="18" fill="#9df3ff" opacity=".7"/>
+</svg>

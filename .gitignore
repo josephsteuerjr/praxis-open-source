@@ -1,0 +1,95 @@
+.env
+.env.*
+!.env.example
+.deploy.env
+.venv/
+__pycache__/
+*.session
+*.session*
+memory/people/*
+memory/journal/*
+memory/rooms/*
+memory/dialogues/*
+!memory/people/_пример.md
+memory/INDEX.md
+memory/.vectors/
+memory/.scratch/
+memory/.buffers/
+memory/.summaries/
+memory/.consolidated.json
+memory/rooms_allowlist.json
+memory/rooms_gate.json
+memory/frozen_chats.json
+memory/known_ids.json
+memory/.unknown_counts.json
+memory/.heartbeat.json
+memory/.boot.json
+memory/.panic
+memory/.logs/
+memory/.panel/
+memory/mailbox.json
+workspace/
+memory/.state/
+memory/.forge/
+memory/access/
+# Durable runtime evidence and generated navigation views are private data,
+# never source snapshots. Markdown/JSONL inside runs remain canonical at runtime.
+memory/runs/
+memory/maps/
+memory/self/
+memory/desires/
+# Canonical lived memory is private runtime data (backed up with memory/, never source code).
+memory/life/
+# Admitted-group transcripts and their generated topic/participant maps are private
+# runtime memory.  They are backed up with memory/, never published in source mirrors.
+memory/groups/
+# Private machine evidence/cards are indexed at runtime, never source code.
+memory/computer/
+memory/absence.json
+.proposals/
+memory/proposals.json
+memory/selfdev_policy.json
+memory/.control/
+memory/graph.md
+memory/llm.json*
+memory/.llm*.json
+memory/tasks.json
+memory/.tasks*.json
+memory/goals.md
+memory/bench/runs/
+memory/bench/config_b.json
+memory/.self_distilled.json
+memory/reflections.md
+memory/home.md
+memory/.trash/
+# Private one-way migrations keep exact retired bytes here.  They are runtime
+# provenance, not publishable source or automatic orientation.
+memory/.archive/
+soul/self.md
+soul/self/
+soul/reflexes.md
+soul/rails.md
+# Personality/history snapshots are private runtime provenance.  Source history
+# already preserves previous public bytes; do not duplicate them as living docs.
+soul/archive/
+
+# Компилируемый пол рук — артефакты сборки, не исходники.
+hands/target/
+body/target/
+body/state/
+body/body.json
+body/service-body.json
+body/system-router.json
+bin/
+.build/
+
+# Файл-сигналы рестарта сервисов. В git им нельзя: bootguard-откат
+# (git reset --hard) воскресил бы флаг со свежим mtime и увёл сервис в перезапуск.
+memory/.restart_*
+
+# Кэш длительностей модулей для praxis_test_parallel: локальная мера этой машины,
+# в репозитории ей делать нечего — на другом железе она просто врёт.
+.praxis_test_durations.json
+
+# Черновики и планировочные записки в корне не живут: AGENTS.md разрешает шесть доков.
+CLAUDE_CODE_INTERMEDIATE_PASS.md

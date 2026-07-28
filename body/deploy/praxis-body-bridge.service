@@ -1,0 +1,24 @@
+[Unit]
+Description=Praxis body bridge (praxis.body.v1)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=praxis-body
+Group=praxis-body
+EnvironmentFile=/etc/praxis-body-bridge.env
+ExecStart=/opt/praxis-body-bridge/bin/praxis-bridge --listen 172.17.0.1:9473 --state-dir /opt/praxis-body-bridge/state
+Restart=always
+RestartSec=2
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/praxis-body-bridge/state
+LimitCORE=0
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

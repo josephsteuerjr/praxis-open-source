@@ -1,0 +1,16 @@
+[package]
+name = "praxis-hands"
+version = "0.2.0"
+edition = "2021"
+description = "Praxis hands: compiled floor for her coding hands (exec/edit/write/outline/search)"
+
+# Зависимостей НЕТ и не будет: бинарь должен собираться офлайн, за минуту, и быть
+# скучно-предсказуемым. Всё, что нужно, есть в std. Регекспы живут в питоне.
+[dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

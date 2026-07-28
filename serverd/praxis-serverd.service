@@ -1,0 +1,27 @@
+[Unit]
+Description=praxis-serverd — root-демон-хозяйка сервера (PASS 23.2)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/praxis-serverd/lib/broker.py
+Restart=always
+RestartSec=2
+User=root
+# Durable operation supervisors must survive broker restart. They have their own pid/boot identity
+# and are stopped explicitly through op.stop; default control-group killing would destroy handles.
+KillMode=process
+TimeoutStopSec=10
+Environment=PRAXIS_SERVERD_HOME=/opt/praxis-serverd
+Environment=PRAXIS_SERVERD_STATE=/opt/praxis-serverd/state
+Environment=PRAXIS_SERVERD_RUN=/opt/praxis-serverd/run
+Environment=PRAXIS_SERVERD_PIN_CGROUP=1
+Environment=PRAXIS_SERVERD_PIN_CONTAINER=praxis
+Environment=PRAXIS_SERVERD_MAX_OPERATIONS=24
+# ремни ресурсов на сам демон (дети капятся отдельно в коде)
+LimitCORE=0
+TasksMax=4096
+
+[Install]
+WantedBy=multi-user.target

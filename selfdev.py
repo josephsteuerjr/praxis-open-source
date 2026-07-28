@@ -1,0 +1,589 @@
+"""
+Praxis — контур доказуемых изменений собственного кода.
+
+Смелая правка ядра идёт через отдельную рабочую копию, проверку и откат:
+  start_proposal → git-worktree на ветке proposal/<id> (живой код не трогается)
+  → её правки руками (shell) в этой копии → submit_proposal → тесты гоняются
+  автоматически в песочнице → мёрж её собственного решения → карточка Егору постфактум
+  → мягкий перезапуск на новом коде (bootguard страхует
+  preflight'ом и откатом, как всегда).
+
+Зоны — классификация риска для её ревью и owner receipt, не разрешения:
+  * protected: крэш-критичные bootguard/selfgit/selfdev/Docker и host-control;
+  * auto: привычная low-risk область из memory/selfdev_policy.json;
+  * review: всё остальное требует особенно внимательного собственного review.
+
+Зелёные тесты ведут к self-merge в любой зоне. Красные не становятся скрытым вето:
+Praxis может исправить их или передать явный override_reason; причина останется в ledger,
+журнале и owner card. Immune verdict — второе мнение, а не внешний судья.
+
+Отказ — тоже сигнал: причина отклонения пишется ей в дневник, она её видит.
+Stdlib + git, без новых зависимостей. Модель здесь не зовётся вообще.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import fnmatch
+import hashlib
+import json
+import logging
+import os
+import re
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+
+log = logging.getLogger("praxis-selfdev")
+
+# Репозиторий (git) и база памяти (в тестах уводится PRAXIS_BASE-песочницей).
+REPO = Path(__file__).resolve().parent
+BASE = Path(os.environ.get("PRAXIS_BASE") or Path(__file__).resolve().parent)
+MEM_DIR = BASE / "memory"
+LEDGER = MEM_DIR / "proposals.json"
+POLICY_FILE = MEM_DIR / "selfdev_policy.json"
+CONTROL_DIR = MEM_DIR / ".control"
+RESTART_REQ = CONTROL_DIR / "restart_request.txt"
+JOURNAL_DIR = MEM_DIR / "journal"
+
+WT_SUBDIR = ".proposals"           # worktree-копии внутри репо (gitignored)
+GIT_TIMEOUT = 60
+TEST_TIMEOUT = int(os.getenv("PRAXIS_PROPOSAL_TEST_TIMEOUT", "600"))
+
+# High-risk classifier.  It affects receipts/review attention, never authority to merge.
+PROTECTED_PATTERNS = (
+    "bootguard.py", "selfgit.py", "selfdev.py",
+    "Dockerfile", "docker-compose*",
+    # PASS 17.B/C: реестр сервисов и её сторона правок хоста — рельсы уровня машины;
+    # предлагать правки можно, авто-мёржить нельзя (боевой hostagent живёт вне репо).
+    "services.py", "hostops.py", "hostagent.py",
+)
+_DEFAULT_POLICY = {"auto": ["soul/*", "workspace/*"]}
+
+
+def floor() -> tuple[str, ...]:
+    """Effective high-risk patterns; a classifier, not a capability boundary."""
+    skip = {p.strip() for p in (os.getenv("PRAXIS_FLOOR_SKIP") or "").replace(";", ",").split(",")
+            if p.strip()}
+    return tuple(p for p in PROTECTED_PATTERNS if p not in skip)
+
+
+def merge_mode() -> str:
+    """Praxis owns the final merge decision; zones only describe review risk."""
+    return "sovereign"
+
+
+def should_automerge(zone: str) -> bool:
+    """Every classified zone may self-merge after review and verification."""
+    return zone in {"auto", "review", "protected"}
+
+
+# --------------------------------------------------------------------------- #
+#  Мелкая сантехника
+# --------------------------------------------------------------------------- #
+
+def _now() -> str:
+    return _dt.datetime.now().isoformat(timespec="minutes")
+
+
+def _git(*args: str, cwd: Path | None = None):
+    return subprocess.run(["git", "-C", str(cwd or REPO), *args],
+                          capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          timeout=GIT_TIMEOUT)
+
+
+def _main_branch() -> str:
+    r = _git("rev-parse", "--abbrev-ref", "HEAD")
+    name = (r.stdout or "").strip()
+    return name if name and name != "HEAD" else "master"
+
+
+def _load() -> list[dict]:
+    try:
+        d = json.loads(LEDGER.read_text(encoding="utf-8"))
+        return d if isinstance(d, list) else []
+    except Exception:
+        return []
+
+
+def _save(items: list[dict]) -> None:
+    LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    tmp = LEDGER.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=0), encoding="utf-8")
+    tmp.replace(LEDGER)
+
+
+def get(pid: str) -> dict | None:
+    for t in _load():
+        if t.get("id") == pid:
+            return t
+    return None
+
+
+def _update(pid: str, **fields) -> dict | None:
+    items = _load()
+    for t in items:
+        if t.get("id") == pid:
+            t.update(fields)
+            t["updated"] = _now()
+            _save(items)
+            return t
+    return None
+
+
+def _deny(rail: str, op: str, detail: str) -> None:
+    """PASS 18.2: событие «отказано» — лениво (rails импортирует нас), никогда не роняет."""
+    try:
+        import rails
+        rails.deny(rail, op, detail)
+    except Exception:
+        log.debug("selfdev._deny не записал", exc_info=True)
+
+
+def _journal(msg: str) -> None:
+    """Строка ей в дневник (как bootguard): она читает его и видит судьбу предложений."""
+    try:
+        JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
+        p = JOURNAL_DIR / f"{_dt.date.today().isoformat()}.md"
+        if not p.exists():
+            p.write_text(f"# {_dt.date.today().isoformat()}\n\n", encoding="utf-8")
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(f"- {_dt.datetime.now():%H:%M} (s3) [предложение] {msg}\n")
+    except Exception:
+        log.debug("journal selfdev не удался", exc_info=True)
+
+
+def worktree_path(pid: str) -> Path:
+    return REPO / WT_SUBDIR / pid
+
+
+# --------------------------------------------------------------------------- #
+#  Зоны автономии
+# --------------------------------------------------------------------------- #
+
+def policy() -> dict:
+    """{'auto': [паттерны]} — читается из memory/selfdev_policy.json, дефолт пишется при первом чтении."""
+    try:
+        d = json.loads(POLICY_FILE.read_text(encoding="utf-8"))
+        if isinstance(d, dict) and isinstance(d.get("auto"), list):
+            return {"auto": [str(x) for x in d["auto"]]}
+    except Exception:
+        pass
+    try:
+        POLICY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if not POLICY_FILE.exists():
+            POLICY_FILE.write_text(json.dumps(_DEFAULT_POLICY, ensure_ascii=False, indent=1),
+                                   encoding="utf-8")
+    except Exception:
+        log.debug("policy default не записался", exc_info=True)
+    return dict(_DEFAULT_POLICY)
+
+
+def autonomy_change(action: str, pattern: str = "") -> str:
+    """Manage low-risk classification globs; all zones retain the same merge authority."""
+    action = (action or "").strip().lower()
+    pats = list(policy().get("auto") or [])
+    if action == "list":
+        eff = floor()
+        skipped = [p for p in PROTECTED_PATTERNS if p not in eff]
+        return "low-risk зона: " + (", ".join(pats) or "—") + \
+               f"; authority: {merge_mode()}" + \
+               f"; high-risk маркеры: {', '.join(eff) or '—'}" + \
+               (f"; снято из классификатора: {', '.join(skipped)}" if skipped else "")
+    pattern = (pattern or "").strip().replace("\\", "/")
+    if not pattern:
+        return "нужен pattern (glob), например workspace/* или test_*.py"
+    if action == "add":
+        if pattern in pats:
+            return f"«{pattern}» уже в low-risk зоне"
+        pats.append(pattern)
+    elif action == "remove":
+        if pattern not in pats:
+            return f"«{pattern}» и так нет в low-risk зоне"
+        pats.remove(pattern)
+    else:
+        return "action: add | remove | list"
+    try:
+        POLICY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = POLICY_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"auto": pats}, ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+        tmp.replace(POLICY_FILE)
+    except Exception as e:
+        return f"не записалось: {e}"
+    _journal(f"я изменила low-risk классификацию ({action} {pattern}): теперь [{', '.join(pats) or '—'}]")
+    return f"low-risk зона теперь: {', '.join(pats) or '—'} (это классификация, не разрешение)"
+
+
+def zone_for(files: list[str]) -> str:
+    """Зона предложения по затронутым файлам: protected > review > auto (худшее побеждает)."""
+    if not files:
+        return "review"
+    auto_pats = policy().get("auto") or []
+    zone = "auto"
+    for f in files:
+        f = f.replace("\\", "/")
+        base = f.rsplit("/", 1)[-1]
+        if any(fnmatch.fnmatch(f, p) or fnmatch.fnmatch(base, p) for p in floor()):
+            return "protected"
+        if not any(fnmatch.fnmatch(f, p) for p in auto_pats):
+            zone = "review"
+    return zone
+
+
+# --------------------------------------------------------------------------- #
+#  Жизненный цикл предложения
+# --------------------------------------------------------------------------- #
+
+def begin(reason: str = "") -> dict:
+    """Открыть предложение: ветка proposal/<id> + worktree. Живой код не трогается."""
+    if not (REPO / ".git").exists():
+        return {"ok": False, "msg": "здесь нет git-репозитория — контур недоступен"}
+    pid = uuid.uuid4().hex[:8]
+    wt = worktree_path(pid)
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    r = _git("worktree", "add", "-b", f"proposal/{pid}", str(wt), "HEAD")
+    if r.returncode != 0:
+        return {"ok": False, "msg": f"worktree не создался: {(r.stderr or '').strip()[:200]}"}
+    try:  # заглушка: чтобы load_dotenv в тестах не дошёл до живого /app/.env (find_dotenv идёт вверх)
+        (wt / ".env").write_text("# proposal sandbox: пусто, живой .env не подхватывать\n",
+                                 encoding="utf-8")
+    except Exception:
+        log.debug("decoy .env не записался", exc_info=True)
+    items = _load()
+    items.append({"id": pid, "title": "", "why": (reason or "").strip(),
+                  "branch": f"proposal/{pid}", "status": "building",
+                  "zone": None, "files": [], "diffstat": "", "tests": None,
+                  "created": _now(), "updated": _now(), "notified": False,
+                  "decided_by": "", "reason": ""})
+    _save(items)
+    log.info("proposal %s открыт: %s", pid, (reason or "")[:80])
+    return {"ok": True, "id": pid, "path": str(wt)}
+
+
+def run_tests(pid: str) -> dict:
+    """Прогнать тесты в worktree предложения (песочница PRAXIS_TEST). -> {ok, summary}."""
+    wt = worktree_path(pid)
+    if not wt.exists():
+        return {"ok": False, "summary": "нет worktree"}
+    # Чистое окружение (белый список): контейнер живёт с env_file — боевые ключи и ручки
+    # (почта, web_search, evaluator) не должны протекать в прогон и мимо песочницы.
+    env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR")}
+    env.setdefault("HOME", "/root")
+    env.setdefault("LANG", "C.UTF-8")
+    env["PRAXIS_TEST"] = "1"
+    env["PYTHONPATH"] = str(wt)
+    try:
+        # The repository-local entrypoint activates the disposable PRAXIS_BASE
+        # before unittest imports any runtime module.  sitecustomize is not a
+        # portable cwd hook and was deliberately retired.
+        r = subprocess.run([sys.executable, str(wt / "praxis_test.py"), "discover", "-q"],
+                           cwd=str(wt), env=env, capture_output=True, text=True,
+                           timeout=TEST_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "summary": f"тесты не уложились в {TEST_TIMEOUT}s"}
+    combined = ((r.stderr or "") + (r.stdout or "")).strip()
+    m = re.search(r"Ran (\d+) tests?", combined)
+    ran = m.group(1) if m else "?"
+    ok = r.returncode == 0
+    # Name what actually failed.  Reading only the last three lines let unrelated
+    # host-agent chatter crowd out both the "Ran N tests" line and every failing
+    # test id, which left her overriding a red verdict she could not inspect.
+    named = [line.strip() for line in combined.splitlines()
+             if line.startswith(("FAIL:", "ERROR:"))]
+    detail = "\n".join(named[:20]) if named else "\n".join(combined.splitlines()[-3:])
+    return {"ok": ok, "summary": (f"{ran} тестов, " + ("зелёные" if ok else "ЕСТЬ ПАДЕНИЯ")
+                                  + (f"\n{detail}" if not ok else ""))}
+
+
+# PASS 16.4: «код она ревьюит сама» — submit требует ЕЁ вердикт по диффу.
+# Не LLM-ревью и не цензор: ритуал чтения собственного диффа перед отправкой.
+REVIEW_MIN_CHARS = 40                 # короче — отписка, не ревью
+SAME_DIFF_REJECT_CAP = 3              # байт-в-байт дифф, отклонённый столько раз → «измени подход»
+
+
+def _review_problem(review: str, title: str, why: str) -> str:
+    """'' если ревью живое; иначе — короткая причина отказа (пустое/отписочное)."""
+    r = (review or "").strip()
+    if not r:
+        return "пустое"
+    if len(r) < REVIEW_MIN_CHARS:
+        return f"слишком короткое ({len(r)} симв. — это отписка, не вердикт)"
+    if r.lower() in {(title or "").strip().lower(), (why or "").strip().lower()}:
+        return "просто повторяет title/why"
+    return ""
+
+
+def _fingerprint(diff: str) -> str:
+    return hashlib.sha256(diff.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def submit(pid: str, title: str, why: str = "", review: str = "", checked: str = "",
+           override_reason: str = "") -> str:
+    """Commit, verify, classify and enact Praxis's reviewed decision.
+
+    PASS 16.4: review — её собственный вердикт по диффу (обязателен; пустой/отписочный —
+    отказ с подсказкой посмотреть proposal_diff); checked — чем проверено (тесты/запуск/глазами).
+    ``override_reason`` is the explicit, durable way to proceed despite red tests."""
+    t = get(pid)
+    if not t:
+        return f"Не вижу предложения {pid} — начни с start_proposal."
+    if t["status"] not in ("building", "proposed"):
+        return f"Предложение {pid} уже {t['status']} — оно закрыто."
+    wt = worktree_path(pid)
+    if not wt.exists():
+        return f"Рабочая копия предложения {pid} пропала — начни заново."
+    problem = _review_problem(review, title, why)
+    if problem:
+        _deny("proposal_review", "submit", f"{pid}: ревью {problem}")
+        return (f"Не отправляю: ревью {problem}. Прочитай свой дифф глазами — "
+                f"proposal_diff(id=\"{pid}\") — и передай review=: что меняется, чем рискует, "
+                "почему это правильно. Твой код ревьюишь ты сама, никто за тебя.")
+    main = _main_branch()
+
+    _git("add", "-A", cwd=wt)
+    subprocess.run(["git", "-C", str(wt),
+                    "-c", "user.name=Praxis", "-c", "user.email=praxis@local",
+                    "commit", "-q", "-m", f"proposal {pid}: {title.strip() or 'без названия'}"],
+                   capture_output=True, text=True, timeout=GIT_TIMEOUT)
+
+    files = [l.strip() for l in
+             _git("diff", "--name-only", f"{main}...HEAD", cwd=wt).stdout.splitlines() if l.strip()]
+    if not files:
+        return "В предложении нет изменений — нечего отправлять. Правь файлы в его копии или закрой его (reject)."
+    # 16.4: кап идентичных диффов — анти-жвачка, не цензура. Изменившийся дифф = новый отпечаток.
+    fp = _fingerprint(_git("diff", f"{main}...HEAD", cwd=wt).stdout)
+    same_rejected = [x for x in _load()
+                     if x.get("id") != pid and x.get("status") == "rejected"
+                     and x.get("fingerprint") == fp]
+    override_reason = str(override_reason or "").strip()
+    if len(same_rejected) >= SAME_DIFF_REJECT_CAP and not override_reason:
+        _update(pid, fingerprint=fp)
+        _deny("proposal_review", "submit", f"{pid}: кап идентичных диффов ×{len(same_rejected)}")
+        return (f"Стоп: байт-в-байт такой же дифф уже отклонялся {len(same_rejected)} раза. "
+                "Повторная подача того же — жвачка. Измени подход (другой дифф обнуляет счёт) "
+                "или передай осознанный override_reason, почему именно этот вариант всё же нужен.")
+    stat = _git("diff", "--stat", f"{main}...HEAD", cwd=wt).stdout.strip().splitlines()
+    diffstat = stat[-1].strip() if stat else ""
+    # Crash-safe: гейт ниже — минуты, а рестарты штатны (каждый мёрж сам просит рестарт).
+    # Титул/ревью фиксируются в леджере ДО гейта: упавший на гейте submit больше не
+    # оставляет безымянную building-оболочку при титулованном коммите в ветке.
+    _update(pid, title=title.strip(), why=(why or t.get("why") or "").strip(),
+            review=review.strip(), checked=(checked or "").strip(), fingerprint=fp,
+            files=files, diffstat=diffstat)
+    tests = run_tests(pid)
+    zone = zone_for(files)
+    _update(pid, title=title.strip(), why=(why or t.get("why") or "").strip(),
+            review=review.strip(), checked=(checked or "").strip(), fingerprint=fp,
+            override_reason=override_reason,
+            files=files, diffstat=diffstat, tests=tests, zone=zone,
+            status="proposed", notified=False)
+    _journal(f"моё ревью «{title.strip() or pid}» ({pid}): {review.strip()[:300]}"
+             + (f" | проверено: {checked.strip()[:120]}" if (checked or "").strip() else ""))
+    log.info("proposal %s submitted: zone=%s tests_ok=%s files=%d", pid, zone, tests["ok"], len(files))
+
+    if should_automerge(zone) and (tests["ok"] or override_reason):
+        res = apply(pid, by="auto", override_reason=override_reason)
+        how = f"self-authority, зона {zone}"
+        if res["ok"]:
+            proof = "тесты зелёные" if tests["ok"] else f"красные тесты, override: {override_reason}"
+            return (f"Предложение {pid} «{title.strip()}» ({how}), {proof} — смёржила сама. "
+                    f"{res['msg']}")
+        return f"Предложение {pid} ({how}), но технически не смёржилось: {res['msg']}."
+    return (f"Предложение {pid} «{title.strip()}» отправлено: {len(files)} файл(ов), {diffstat}; "
+            f"тесты: {tests['summary'].splitlines()[0]}. Исправь проверки или повтори submit с "
+            "override_reason — решение остаётся твоим, а причина останется в provenance.")
+
+
+def diff_text(pid: str, cap: int = 12000) -> str:
+    """Полный дифф предложения против основной ветки (для карточки/плитки/её глаз).
+
+    PASS 16.4: пока worktree жив, видны и ещё НЕ закоммиченные правки (add -A + дифф
+    от merge-base к рабочему дереву) — она читает дифф ДО submit, ревью пишется по нему."""
+    t = get(pid)
+    if not t:
+        return ""
+    main = _main_branch()
+    wt = worktree_path(pid)
+    if wt.exists():
+        _git("add", "-A", cwd=wt)  # новые файлы тоже видны (submit всё равно делает add -A)
+        mb = _git("merge-base", main, "HEAD", cwd=wt).stdout.strip()
+        out = _git("diff", mb or main, cwd=wt).stdout
+    else:
+        out = _git("diff", f"{main}...{t['branch']}").stdout
+    return out[:cap] + ("\n… (обрезано)" if len(out) > cap else "")
+
+
+def _cleanup(pid: str, drop_branch: bool) -> None:
+    wt = worktree_path(pid)
+    if wt.exists():
+        _git("worktree", "remove", "--force", str(wt))
+    _git("worktree", "prune")
+    if drop_branch:
+        _git("branch", "-D", f"proposal/{pid}")
+
+
+def reconcile() -> dict:
+    """Прибрать осиротевшие building-оболочки; восстановить титулы из бранч-коммитов.
+
+    Рестарт посреди submit() (длинный гейт; рестарты штатны) оставлял титулованный
+    коммит в ветке и безымянную building-запись — их накопилось десятки. Ничего не
+    решает ЗА Praxis: беспредметные оболочки (нет ветки / пустой дифф) закрываются с
+    честной причиной, титулованным возвращается имя + заметка в журнал; повторный
+    submit с её ревью остаётся её решением."""
+    closed = restored = 0
+    main = _main_branch()
+    for t in [x for x in _load() if x.get("status") == "building"]:
+        pid = str(t.get("id") or "")
+        branch = str(t.get("branch") or f"proposal/{pid}")
+        if _git("rev-parse", "--verify", "-q", branch).returncode != 0:
+            _cleanup(pid, drop_branch=False)
+            _update(pid, status="rejected", decided_by="auto",
+                    reason="ветка предложения пропала — оболочка после рестарта")
+            closed += 1
+            continue
+        if not _git("diff", f"{main}...{branch}").stdout.strip():
+            _cleanup(pid, drop_branch=True)
+            _update(pid, status="rejected", decided_by="auto",
+                    reason="дифф пуст — изменение уже в живом дереве")
+            closed += 1
+            continue
+        if not str(t.get("title") or "").strip():
+            subject = _git("log", "-1", "--format=%s", branch).stdout.strip()
+            prefix = f"proposal {pid}: "
+            recovered = subject[len(prefix):].strip() if subject.startswith(prefix) else ""
+            if recovered and recovered != "без названия":
+                _update(pid, title=recovered)
+                restored += 1
+    if closed or restored:
+        _journal(f"[selfdev] прибрала оболочки предложений: закрыто {closed} (без ветки/пустой дифф), "
+                 f"титулов восстановлено {restored} — титулованные building ждут моего submit или reject")
+        log.info("selfdev.reconcile: closed=%d restored=%d", closed, restored)
+    return {"closed": closed, "restored": restored}
+
+
+def apply(pid: str, by: str = "egor", override_reason: str = "") -> dict:
+    """Мёрж предложения в живое дерево + мягкий запрос перезапуска. Рельсы дальше страхуют."""
+    t = get(pid)
+    if not t:
+        return {"ok": False, "msg": f"нет предложения {pid}"}
+    if t["status"] not in ("proposed", "building"):
+        return {"ok": False, "msg": f"предложение уже {t['status']}"}
+    override_reason = str(override_reason or "").strip()
+    tests = t.get("tests") or {}
+    if by == "auto" and tests and not tests.get("ok") and not override_reason:
+        return {"ok": False, "msg": "проверки красные; нужен явный override_reason"}
+    # Immune review is a recorded second opinion.  It never owns Praxis's decision.
+    if by == "auto":
+        try:
+            import immune
+            verdict, why = immune.review(diff_text(pid), message=t.get("title") or "",
+                                         reason=t.get("why") or "")
+        except Exception:
+            log.warning("иммунитет не отработал на %s — считаю warn", pid, exc_info=True)
+            verdict, why = "warn", "иммунитет не отработал (исключение) — след в логе"
+        _update(pid, immune={"verdict": verdict, "why": why})
+        if verdict in {"red", "warn"}:
+            _journal(f"[иммунитет] {verdict} «{t.get('title') or pid}» ({pid}): {why} — "
+                     "это второе мнение; решение и rollback остаются моими.")
+            log.warning("иммунитет %s на %s: %s", verdict, pid, (why or "")[:120])
+    # незакоммиченное живое (если есть) — снапшотим, чтобы мёрж не съел её текущие правки
+    if _git("status", "--porcelain").stdout.strip():
+        _git("add", "-A")
+        subprocess.run(["git", "-C", str(REPO), "-c", "user.name=Praxis",
+                        "-c", "user.email=praxis@local", "commit", "-q", "-m",
+                        f"snapshot before merge {pid}"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=GIT_TIMEOUT)
+    title = t.get("title") or "без названия"
+    r = _git("merge", "--no-ff", "-m", f"proposal {pid}: {title} (merged by {by})", t["branch"])
+    if r.returncode != 0:
+        _git("merge", "--abort")
+        msg = (r.stderr or r.stdout or "").strip()[:200]
+        _update(pid, reason=f"конфликт мёржа: {msg}")
+        return {"ok": False, "msg": f"конфликт мёржа: {msg}"}
+    _cleanup(pid, drop_branch=True)
+    _update(pid, status="merged", decided_by=by, notified=(by != "auto"),
+            override_reason=override_reason)
+    actor = "сама, после собственного review" if by == "auto" else "Егор одобрил"
+    _journal(f"«{title}» ({pid}) смёржено ({actor})"
+             + (f"; override: {override_reason}" if override_reason else "")
+             + " — перезапущусь на новом коде.")
+    request_restart(f"proposal {pid} merged")
+    log.info("proposal %s merged by %s", pid, by)
+    return {"ok": True, "msg": "смёржено; перезапуск на новом коде запрошен"}
+
+
+def reject(pid: str, reason: str = "", by: str = "egor") -> dict:
+    """Отклонить: копия и ветка убираются, причина — ей в дневник (отказ — тоже сигнал)."""
+    t = get(pid)
+    if not t:
+        return {"ok": False, "msg": f"нет предложения {pid}"}
+    if t["status"] in ("merged", "rejected"):
+        return {"ok": False, "msg": f"предложение уже {t['status']}"}
+    _cleanup(pid, drop_branch=True)
+    _update(pid, status="rejected", decided_by=by, reason=(reason or "").strip())
+    title = t.get("title") or t.get("why") or pid
+    _journal(f"Егор отклонил «{title}» ({pid})" + (f": {reason.strip()}" if reason.strip() else " (без причины)")
+             + ". Это сигнал, не поражение — учту.")
+    log.info("proposal %s rejected: %s", pid, (reason or "")[:80])
+    return {"ok": True, "msg": "отклонено"}
+
+
+# --------------------------------------------------------------------------- #
+#  Списки / уведомления / перезапуск
+# --------------------------------------------------------------------------- #
+
+def all_items(limit: int = 30) -> list[dict]:
+    return _load()[-limit:]
+
+
+def pending_review() -> list[dict]:
+    return [t for t in _load() if t.get("status") == "proposed"]
+
+
+def unnotified() -> list[dict]:
+    return [t for t in _load() if t.get("status") in ("proposed", "merged") and not t.get("notified")]
+
+
+def mark_notified(pid: str) -> None:
+    _update(pid, notified=True)
+
+
+def list_text() -> str:
+    """Краткий список для её тула."""
+    items = _load()
+    if not items:
+        return "Предложений ещё не было."
+    out = []
+    for t in items[-10:]:
+        tests = t.get("tests") or {}
+        mark = {"proposed": "ждёт", "merged": "смёржено", "rejected": "отклонено",
+                "building": "строится"}.get(t.get("status"), t.get("status"))
+        out.append(f"#{t['id']} [{mark}] «{t.get('title') or t.get('why') or '—'}» "
+                   f"({t.get('diffstat') or 'без диффа'}; тесты: "
+                   f"{'ок' if (tests or {}).get('ok') else '—'})"
+                   + (f" — ответ Егора: {t['reason']}" if t.get("reason") else ""))
+    return "\n".join(out)
+
+
+def request_restart(reason: str) -> None:
+    try:
+        CONTROL_DIR.mkdir(parents=True, exist_ok=True)
+        RESTART_REQ.write_text(f"{_now()} {reason}".strip(), encoding="utf-8")
+    except Exception:
+        log.warning("restart_request не записался", exc_info=True)
+
+
+def restart_requested() -> str:
+    try:
+        return RESTART_REQ.read_text(encoding="utf-8").strip() if RESTART_REQ.exists() else ""
+    except Exception:
+        return ""
+
+
+def clear_restart_request() -> None:
+    try:
+        RESTART_REQ.unlink(missing_ok=True)
+    except Exception:
+        log.debug("clear_restart_request не удался", exc_info=True)

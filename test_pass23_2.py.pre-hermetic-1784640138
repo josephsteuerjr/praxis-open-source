@@ -1,0 +1,132 @@
+"""PASS 23.2 контейнерная сторона: роутинг host-scope, graceful без демона, тул-поверхность."""
+from __future__ import annotations
+
+import unittest
+from unittest import mock
+
+
+class RoutingCase(unittest.TestCase):
+    def test_host_task_prefix(self):
+        import agent
+        self.assertTrue(agent._is_host_task("hcode-abc123"))
+        self.assertFalse(agent._is_host_task("code-abc123"))
+        self.assertFalse(agent._is_host_task(""))
+
+    def test_serverd_client_graceful_when_unmounted(self):
+        import serverd_client
+        # в песочнице/без маунта сокета нет — не бросаем, честная строка
+        self.assertFalse(serverd_client.available())
+        r = serverd_client.start("g", "/etc")
+        self.assertFalse(r.get("ok"))
+        self.assertIn("serverd", r.get("error", "").lower())
+        self.assertEqual(serverd_client.state_line(), "")
+
+    def test_host_ctl_on_owner_surface(self):
+        import agent
+        names = {t["name"] for t in agent.OWNER_TOOLS}
+        self.assertIn("host_ctl", names)
+        self.assertIn("host_ctl", agent.TOOL_IMPL)
+        # coding_session несёт scope
+        cs = next(t for t in agent.OWNER_TOOLS if t["name"] == "coding_session")
+        self.assertIn("scope", cs["input_schema"]["properties"])
+        host = next(t for t in agent.OWNER_TOOLS if t["name"] == "host_ctl")
+        self.assertEqual(set(host["input_schema"]["properties"]["verb"]["enum"]),
+                         {"systemctl", "docker", "pkg", "file", "net", "reboot", "confirm"})
+
+    def test_coding_session_host_scope_without_daemon_is_graceful(self):
+        import agent
+        out = agent.tool_coding_session("start", goal="probe", target="/etc", scope="host")
+        self.assertIn("serverd", out.lower())  # честный отказ, не исключение
+
+    def test_host_task_is_owned_by_canonical_forge_not_broker(self):
+        import forge
+        import tempfile
+        from pathlib import Path
+        old = forge.BASE, forge.STATE_DIR, forge.TASKS_DIR
+        with tempfile.TemporaryDirectory() as tmp:
+            forge.BASE = Path(tmp)
+            forge.STATE_DIR = Path(tmp) / "state"
+            forge.TASKS_DIR = forge.STATE_DIR / "tasks"
+            with mock.patch.object(forge.serverd_client, "available", return_value=True), \
+                 mock.patch.object(forge.serverd_client, "workspace_inspect_result",
+                                   return_value={"ok": True, "text": "HOST ROOT: /etc\ngit: none",
+                                                 "head": "abc123", "git_root": "/etc"}):
+                out = forge.start_host("inspect host", "/etc")
+            task_id = out.split(":", 1)[0].replace("coding-задача ", "")
+            task = forge.get(task_id)
+            self.assertEqual(task["scope"], "host")
+            self.assertEqual(task["backend"], "praxis.host.v2")
+            self.assertEqual(task["base_commit"], "abc123")
+            self.assertTrue((forge.TASKS_DIR / task_id / "task.json").is_file())
+        forge.BASE, forge.STATE_DIR, forge.TASKS_DIR = old
+
+    def test_owner_host_routes_through_one_forge_surface(self):
+        import agent
+        with mock.patch.object(agent.forge, "start_host", return_value="coding-задача hcode-one: g") as start:
+            out = agent.tool_coding_session("start", goal="g", target="/etc", scope="host")
+        self.assertIn("hcode-one", out)
+        start.assert_called_once_with("g", "/etc", priority="normal")
+
+    def test_host_task_primitives_and_worker_route_through_forge(self):
+        import forge
+        import tempfile
+        from pathlib import Path
+        old = forge.BASE, forge.STATE_DIR, forge.TASKS_DIR
+        with tempfile.TemporaryDirectory() as tmp:
+            forge.BASE = Path(tmp)
+            forge.STATE_DIR = Path(tmp) / "state"
+            forge.TASKS_DIR = forge.STATE_DIR / "tasks"
+            with mock.patch.object(forge.serverd_client, "available", return_value=True), \
+                 mock.patch.object(forge.serverd_client, "workspace_inspect_result",
+                                   return_value={"ok": True, "text": "HOST ROOT: /srv/project"}):
+                out = forge.start_host("host work", "/srv/project")
+            task_id = out.split(":", 1)[0].replace("coding-задача ", "")
+            with mock.patch.object(forge.serverd_client, "workspace_inspect",
+                                   return_value="root file"), \
+                 mock.patch.object(forge.serverd_client, "workspace_edit",
+                                   return_value="edited"), \
+                 mock.patch.object(forge.serverd_client, "run", return_value="ran"), \
+                 mock.patch.object(forge.serverd_client, "process", return_value="op-1"), \
+                 mock.patch.object(forge.serverd_client, "checkpoint", return_value="checkpointed"), \
+                 mock.patch.object(forge, "_spawn_runner", return_value=4242):
+                self.assertEqual(forge.inspect(task_id, "read", path="x"), "root file")
+                self.assertEqual(forge.edit(task_id, "write", path="x", content="y"), "edited")
+                self.assertEqual(forge.run(task_id, "true"), "ran")
+                self.assertEqual(forge.process(task_id, "start", command="sleep 1"), "op-1")
+                self.assertEqual(forge.checkpoint(task_id, "cp"), "checkpointed")
+                spawned = forge.agent(task_id, "spawn", brief="inspect root", role="scout")
+            self.assertIn("agent-", spawned)
+            request = next((forge._task_dir(task_id) / "agents").glob("*/request.json"))
+            payload = __import__("json").loads(request.read_text(encoding="utf-8"))
+            self.assertEqual(payload["task_id"], task_id)
+            self.assertEqual(payload["root"], "/srv/project")
+        forge.BASE, forge.STATE_DIR, forge.TASKS_DIR = old
+
+    def test_broker_has_no_second_model_or_agent_capability(self):
+        from serverd import broker
+        flat = {item for values in broker.CAPABILITIES.values() for item in values}
+        self.assertNotIn("agent", flat)
+        self.assertNotIn("llm", flat)
+        self.assertEqual(broker.PROTOCOL, "praxis.host.v2")
+
+    def test_transport_retry_reuses_same_idempotency_key(self):
+        import serverd_client
+        seen = []
+
+        def exchange(request, **_kwargs):
+            seen.append(request["request_id"])
+            if len(seen) == 1:
+                return {"ok": False, "code": "eof"}
+            return {"ok": True, "id": "op-one"}
+
+        with mock.patch.object(serverd_client, "available", return_value=True), \
+             mock.patch.object(serverd_client, "_token", return_value="token"), \
+             mock.patch.object(serverd_client, "_exchange", side_effect=exchange), \
+             mock.patch.object(serverd_client.time, "sleep"):
+            result = serverd_client.call("op.start", {"command": "true"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(set(seen)), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
