@@ -1,0 +1,87 @@
+# Praxis — бандл «запустить одной командой».
+#
+# Работает одинаково в Docker Desktop (Windows/macOS) и на сервере: host-сети нет
+# нигде, все адреса — по именам сервисов. Профили выключают то, что нужно не всем.
+#
+#   docker compose -f docker-compose.bundle.yml up -d --build              # только ядро
+#   docker compose -f docker-compose.bundle.yml --profile relay up -d --build   # + relay
+#   docker compose -f docker-compose.bundle.yml --profile ollama up -d          # + локальные эмбеддинги
+#
+# Состояние (память, душа, сессия Telegram) живёт в каталоге репозитория, а не в
+# анонимном томе: удалить контейнер безопасно, удалить каталог — нет.
+
+name: praxis
+
+# Copy env.bundle.example to .env before the first start. The optional declaration
+# keeps `docker compose ... config` inspectable before that copy exists.
+services:
+  praxis:
+    build: .
+    image: praxis:bundle
+    container_name: praxis
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PYTHONUNBUFFERED: "1"
+      # Локальные эмбеддинги ищутся здесь; без профиля ollama просто не используются.
+      OLLAMA_HOST: http://ollama:11434
+    volumes:
+      # Каталог репозитория целиком: так она может править собственный код, а память,
+      # душа и файл сессии переживают пересборку образа. Это же устройство на проде.
+      - ./:/app
+    extra_hosts:
+      # На сервере это даёт доступ к localhost хоста; в Desktop имя уже есть штатно.
+      - "host.docker.internal:host-gateway"
+    # У неё durable-возобновление прогонов: даём успеть дописать состояние.
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  # --- Необязательное: relay (MIT, каталог relay/) --------------------------------
+  # OpenAI-совместимый прокси к твоей собственной подписке ChatGPT/Codex.
+  # Нужен только если хочешь ходить через неё, а не по ключу провайдера.
+  # Одноразовый вход: docker compose -f docker-compose.bundle.yml --profile relay run --rm -it relay relay
+  relay:
+    profiles: ["relay"]
+    build:
+      context: ./relay
+    image: praxis-relay:bundle
+    container_name: praxis-relay
+    environment:
+      HOME: /root
+      RUST_LOG: warn
+      RELAY_INSTRUCTIONS: minimal
+      RELAY_LOG_DIR: /app/logs
+    volumes:
+      - relay_auth:/app/local_auth
+      - relay_logs:/app/logs
+    restart: unless-stopped
+
+  # Бинарь relay слушает жёстко 127.0.0.1:5011 — из другого контейнера это недоступно.
+  # Вместо правки чужого снапшота ставим рядом форвардер В ТОЙ ЖЕ сетевой неймспейс:
+  # он видит петлю relay и отдаёт её наружу как relay:5012. Praxis ходит на
+  # OPENAI_BASE_URL=http://relay:5012 — и в Desktop, и на сервере одинаково.
+  relay-gw:
+    profiles: ["relay"]
+    image: alpine/socat:1.8.0.0
+    container_name: praxis-relay-gw
+    network_mode: "service:relay"
+    command: TCP-LISTEN:5012,fork,reuseaddr TCP:127.0.0.1:5011
+    depends_on:
+      - relay
+    restart: unless-stopped
+
+  # --- Необязательное: локальные эмбеддинги -------------------------------------
+  # Нужно только при PRAXIS_EMBEDDINGS=1. По умолчанию память работает без него.
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama
+    container_name: praxis-ollama
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  relay_auth:
+  relay_logs:
+  ollama_models:
