@@ -344,6 +344,9 @@ class RunManager:
         self.promotion_hook = promotion_hook
         self._thread_lock = threading.RLock()
         self._paths: dict[str, Path] = {}
+        # Прогоны, признанные терминальными (см. settled_run_ids). Терминальность
+        # поглощающая, поэтому запись сюда окончательна и кэш не может протухнуть.
+        self._settled: set[str] = set()
 
     def _validate_id(self, run_id: str) -> str:
         value = str(run_id or "").strip()
@@ -540,6 +543,48 @@ class RunManager:
         run_dir = self._find(run_id)
         with self._locked(run_dir):
             return self._manifest_locked(run_dir)
+
+    def live_run_ids(self) -> list[str]:
+        """``run_ids()`` без тех, про кого уже нечего решать: терминальных.
+
+        Три заботы (доставка текста, жнец осиротевших, durable resume) каждые несколько
+        секунд обходили ВСЕ прогоны и брали эксклюзивный замок на каждом только чтобы
+        прочитать статус. py-spy на живом проде 31.07: **505 из ~600** рабочих сэмплов за
+        30 секунд — это `manifest() → _locked` ровно из этих трёх мест, при том что все
+        1739 прогонов терминальны и решать по ним нечего. Обход идёт в потоке и держит
+        GIL, то есть отъедает у её живого хода, а стоимость растёт линейно с числом
+        прогонов (гарантированный будущий ступор, его уже ловили py-spy раньше).
+
+        Почему статус можно смотреть без замка: терминальность ПОГЛОЩАЮЩАЯ (done /
+        cancelled / failed обратно не оживают), а manifest.json пишется атомарной
+        подменой — рваного чтения не бывает. Любая осечка (нет файла, битый JSON,
+        неизвестный статус) трактуется как «не знаю» и прогон остаётся в выдаче, то есть
+        зовущий идёт прежним путём под замком. Ошибиться эта оптимизация может только в
+        сторону лишней работы, никогда — в сторону пропущенной.
+        """
+        result: list[str] = []
+        if not self.root.exists():
+            return result
+        settled = self._settled
+        for manifest_path in sorted(self.root.glob("*/*/manifest.json")):
+            run_id = manifest_path.parent.name
+            try:
+                self._validate_id(run_id)
+            except ValueError:
+                continue
+            self._paths[run_id] = manifest_path.parent
+            if run_id in settled:
+                continue
+            try:
+                status = str(_read_json(manifest_path).get("status") or "")
+            except Exception:
+                result.append(run_id)  # не знаю — пусть решает обычный путь под замком
+                continue
+            if status in TERMINAL_STATUSES:
+                settled.add(run_id)
+                continue
+            result.append(run_id)
+        return result
 
     def status(self, run_id: str, *, max_events: int | None = None,
                max_bytes: int | None = None,
@@ -2108,6 +2153,50 @@ def life_event_promotion(context: RunContext, recap_path: Path, manifest: dict) 
     """
     import memory_life
 
+    run_dir = recap_path.parent
+    artifact_refs: list[str] = []
+    events_path = run_dir / "events.jsonl"
+    if events_path.exists():
+        with events_path.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if row.get("kind") != "artifact_created":
+                    continue
+                artifact = row.get("artifact") or {}
+                artifact_id = str(artifact.get("artifact_id") or "")
+                if not artifact_id:
+                    continue
+                source_id = f"{context.run_id}:{artifact_id}"
+                existing = next((row for row in reversed(memory_life.iter_events(
+                    kinds={"artifact_receipt"}))
+                    if str(row.get("source_id") or "") == source_id), None)
+                if existing is not None:
+                    artifact_refs.append(str(existing.get("id") or ""))
+                    continue
+                receipt = memory_life.append_event(
+                    "artifact_receipt",
+                    chat_id=context.delivery_chat_id or context.origin_chat_id,
+                    actor="Praxis", direction="internal",
+                    text=(f"Artifact {artifact_id} exists and is content-verified "
+                          f"for run {context.run_id}."),
+                    source="forge", source_id=source_id,
+                    salience=2, refs=(),
+                    dedupe_key=f"artifact_receipt:{context.run_id}:{artifact_id}",
+                    meta={
+                        "run_id": context.run_id,
+                        "artifact_id": artifact_id,
+                        "path": str(artifact.get("path") or ""),
+                        "sha256": str(artifact.get("sha256") or ""),
+                        "size": artifact.get("size"),
+                        "name": str(artifact.get("name") or ""),
+                        "media_type": str(artifact.get("media_type") or ""),
+                    },
+                )
+                artifact_refs.append(str(receipt.get("id") or ""))
+
     for row in reversed(memory_life.iter_events(kinds={"run_episode"})):
         if str(row.get("source_id") or "") == context.run_id:
             return str(row.get("id") or "")
@@ -2118,7 +2207,7 @@ def life_event_promotion(context: RunContext, recap_path: Path, manifest: dict) 
         "run_episode", chat_id=context.delivery_chat_id or context.origin_chat_id,
         actor="Praxis", direction="internal", text=text,
         source="run_manager", source_id=context.run_id, salience=2,
-        refs=(), dedupe_key=f"run_episode:{context.run_id}",
+        refs=tuple(ref for ref in artifact_refs if ref), dedupe_key=f"run_episode:{context.run_id}",
         meta={
             "run_id": context.run_id, "kind": context.kind,
             "status": manifest.get("status"), "recap": recap_rel,

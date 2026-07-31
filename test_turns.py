@@ -10,7 +10,9 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+from unittest import mock
 
 import rooms
 import turns
@@ -19,6 +21,7 @@ from test_layer7 import ScriptedClient
 from test_perceive import Base  # noqa: F401  (герметичный харнесс + фейки anthropic/dotenv)
 
 import agent  # noqa: E402
+import computer_memory  # noqa: E402
 import llm  # noqa: E402
 import notes  # noqa: E402
 
@@ -628,6 +631,29 @@ class TestConsumers(TurnsBase):
         self.assertIn('"fact":"latest_turn","present":true', state)
         self.assertNotIn("MARKER_STATE", state)
         self.assertIn("MARKER_STATE", evidence)
+
+    def test_state_block_keeps_direct_artifact_after_later_lived_turn(self):
+        with mock.patch.dict(os.environ, {"PRAXIS_BASE": str(self.tmp)}):
+            row = computer_memory.record(
+                {"task_id": "run-direct", "device_id": "windows-pc"},
+                "artifact.fetch", {}, "interactive",
+                {"ok": True, "artifact": {"name": "report.txt", "size": 7,
+                                          "sha256": "a" * 64}},
+            )
+            evidence = agent.build_state_evidence_block()
+            self.assertIn("recent_durable_artifact_evidence", evidence)
+            self.assertIn("report.txt", evidence)
+            self.assertIn(row["receipt"], evidence)
+
+            self._mk(out="MARKER_LATER lived turn")
+            later = agent.build_state_evidence_block()
+            self.assertIn("MARKER_LATER", later)
+            self.assertIn("report.txt", later)
+
+    def test_state_block_omits_artifact_record_when_none_exist(self):
+        with mock.patch.dict(os.environ, {"PRAXIS_BASE": str(self.tmp)}):
+            self.assertNotIn("recent_durable_artifact_evidence",
+                             agent.build_state_evidence_block())
 
     def test_missed_frame_answers_with_fact(self):
         boot = agent._BOOT_TS.timestamp()

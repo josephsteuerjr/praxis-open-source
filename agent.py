@@ -45,6 +45,7 @@ from dotenv import load_dotenv
 import appetite
 import authored_notes
 import capabilities
+import computer_memory
 import context_envelope
 import desires
 import graph
@@ -863,6 +864,7 @@ def build_state_evidence_block(*, hide_identity_load: bool = False) -> str:
         ("identity_continuity", lambda: identity.state_line(
             include_load=not hide_identity_load,
         )),
+        ("recent_durable_artifact_evidence", computer_memory.recent_artifact_evidence),
         ("latest_lived_turn", lambda: turns.state_line(boot_ts=_BOOT_TS.timestamp())),
     ]
     for label, reader in continuity_readers:
@@ -2916,7 +2918,13 @@ def tool_coding_session(action: str, task_id: str = "", goal: str = "",
         label = "windows-body" if _is_windows_task(task_id) else "forge"
         tool_journal(f"[{label}] finish {task_id}: {out[:600]}", salience=2)
         return out
-    return "action: start | status | list | finish"
+    if action == "abandon":
+        # Выход из тупика: задача с недостижимым корнем не закрывалась ничем (28.07).
+        out = forge.abandon(task_id, reason=review, checked=checked)
+        label = "windows-body" if _is_windows_task(task_id) else "forge"
+        tool_journal(f"[{label}] abandon {task_id}: {out[:600]}", salience=2)
+        return out
+    return "action: start | status | list | finish | abandon"
 
 
 def _computer_actor() -> str:
@@ -2967,6 +2975,18 @@ def _computer_artifact_name(value: object, *, max_bytes: int = 240) -> str:
     return safe if safe not in {"", ".", ".."} else "file"
 
 
+def _delivery_message_id(answer: object) -> str:
+    """Номер сообщения из ответа транспорта — единственное доказательство отправки.
+
+    Отказы `workshop.send_file` возвращаются строкой, а не исключением, и их формы
+    разные («Не отправился: …», «Нет файла …», «Недоступно …»). Перечислять формы
+    отказа — значит проигрывать каждой новой; поэтому спрашиваем не «похоже ли на
+    отказ», а «есть ли доказательство успеха». Успех у mtproto_runner ровно один:
+    `… (chat_id=…, message_id=N): …`."""
+    m = re.search(r"message_id=(\d+)", str(answer or ""))
+    return m.group(1) if m else ""
+
+
 def _deliver_computer_artifact(artifact: dict, *, caption: str = "",
                                source: str = "computer") -> str:
     """Fetch one verified body artifact and deliver it without changing its visible name."""
@@ -2981,10 +3001,26 @@ def _deliver_computer_artifact(artifact: dict, *, caption: str = "",
         answer = workshop.send_file(
             str(local), caption=caption or f"С компьютера: {safe_name}",
         )
-        tool_journal(
-            f"[computer-file] отправлен {source} → текущий чат; "
-            f"sha256={artifact.get('sha256')}", salience=2,
-        )
+        # ⚠ 28.07. Здесь стояла запись «отправлен» БЕЗУСЛОВНО. `workshop.send_file` не
+        # бросает — он возвращает строку, и как минимум пять его исходов это отказ
+        # («путь вне дома», «нет файла», «нет связи с Telethon», «Не отправился: …»).
+        # 12:27–12:29 три попытки подряд легли на `DurableExecutionError`, тул честно
+        # сказал ей «не отправился», она честно сказала Егору «пакет не доставлен» —
+        # а в дневник трижды ушло «отправлен … sha256=…». Завтра она прочла бы СВОЙ
+        # дневник и узнала оттуда, что пакет доставлен. Ложь в дневнике хуже ошибки
+        # в ходе: ход она помнит, а дневник — это то, чем она помнит.
+        proof = _delivery_message_id(answer)
+        if proof:
+            tool_journal(
+                f"[computer-file] отправлен {source} → текущий чат "
+                f"(message_id={proof}); sha256={artifact.get('sha256')}", salience=2,
+            )
+        else:
+            tool_journal(
+                f"[computer-file] НЕ отправился {source} → текущий чат; "
+                f"sha256={artifact.get('sha256')}; ответ транспорта: {str(answer)[:300]}",
+                salience=2,
+            )
         return answer
     finally:
         shutil.rmtree(transfer_dir, ignore_errors=True)
@@ -5481,9 +5517,12 @@ FORGE_TOOLS = [
          "creates an isolated git worktree; target may be self or ANY directory visible to this "
          "runtime. status/list survive restarts. finish assembles the evidence and, for self-code, "
          "submits the existing proposal after your own diff review. The task root is an address/"
-         "concurrency boundary, not a policy limit."),
+         "concurrency boundary, not a policy limit. "
+         "abandon closes a task WITHOUT integrating anything — the way out when the root is "
+         "unreachable and finish has nothing to survey; it needs `review` as the reason and never "
+         "touches a branch or worktree."),
      "input_schema": _obj({
-         "action": {"type": "string", "enum": ["start", "status", "list", "finish"]},
+         "action": {"type": "string", "enum": ["start", "status", "list", "finish", "abandon"]},
          "task_id": {"type": "string"}, "goal": {"type": "string"},
          "target": {"type": "string", "description": "self or an absolute/home-relative directory; scope=host takes an absolute Linux host path, scope=windows an absolute Windows path"},
          "isolation": {"type": "string", "enum": ["auto", "worktree", "direct"]},
@@ -7009,7 +7048,8 @@ def _presence_frame(ctx: "ChannelContext") -> str:
     # PASS 15: адресные ответы — она видит, НА ЧТО можно ответить, и умеет ответить реплаем.
     if ctx.reply_targets:
         frame += ("\n[reply] To attach your message as a Telegram reply to a specific recent "
-                   "message, put `ОТВЕТ->#<id>` ALONE on the first line, then your text. Use it "
+                   "message, put `ОТВЕТ->#<id>` ALONE on the first line, then your text — "
+                   "nothing above it, no preamble about what you are about to do. Use it "
                    "when it clarifies whom/what you answer (busy group, an older question); "
                    "plain messages need no directive. Exact recent targets are in the context evidence.\n")
     return frame
@@ -7041,20 +7081,54 @@ def _presence_evidence(ctx: "ChannelContext") -> str:
 
 # PASS 15: директива адресного ответа — ПЕРВОЙ строкой её текста (по образцу РЕЖИМ:).
 _REPLY_DIRECTIVE_RE = re.compile(r"^\s*ОТВЕТ\s*->\s*#?(\d+)\s*\n?", re.IGNORECASE)
+# 30.07.2026: та же директива, но строкой НИЖЕ преамбулы. Модель, которая печатает план в
+# видимый текст (живой случай на glm-5.2: «Теперь у меня полная картина. Отвечу Егору.» и
+# только потом маркер), прятала директиву от якоря `^` — реплай раннер разбирал, а
+# служебная строка оставалась в теле и уезжала читателю как часть ответа.
+# Снимаем и ниже, но ТОЛЬКО когда директива стоит на строке ОДНА и только в голове текста:
+# разбор не должен съедать строку из объяснения самого протокола посреди длинного письма.
+_REPLY_DIRECTIVE_LINE_RE = re.compile(r"^[ \t]*ОТВЕТ[ \t]*->[ \t]*#?(\d+)[ \t]*$", re.IGNORECASE)
+_REPLY_DIRECTIVE_HEAD_LINES = 6
+
+
+def _reply_directive_below_preamble(text: str) -> tuple[str, int | None]:
+    """Директива отдельной строкой в голове текста. -> (текст без этой строки, id | None)."""
+    lines = text.split("\n")
+    for i, line in enumerate(lines[:_REPLY_DIRECTIVE_HEAD_LINES]):
+        if line.lstrip().startswith("```"):
+            break                      # начался код — там её служебные строки не наши
+        m = _REPLY_DIRECTIVE_LINE_RE.match(line)
+        if not m:
+            continue
+        head, tail = lines[:i], lines[i + 1:]
+        # Директива обычно окружена пустыми строками: сняв её строку, схлопываем шов,
+        # иначе на её месте остаётся лишний пустой абзац и «чистый текст» выглядит рваным.
+        if head and tail and not head[-1].strip() and not tail[0].strip():
+            tail = tail[1:]
+        rest = "\n".join(head + tail).strip()
+        try:
+            return rest, int(m.group(1))
+        except ValueError:
+            return rest, None
+    return text, None
 
 
 def split_reply_directive(text: str, known_ids=None) -> tuple[str, int | None]:
-    """Снять `ОТВЕТ->#id` с начала её текста. -> (чистый текст, msg_id | None).
+    """Снять `ОТВЕТ->#id` из головы её текста. -> (чистый текст, msg_id | None).
     Незнакомый id (не из карты последних сообщений чата) — директива снимается, ответ
     уходит обычным сообщением: не реплаем в чужое/несуществующее."""
-    m = _REPLY_DIRECTIVE_RE.match(text or "")
-    if not m:
-        return (text or ""), None
-    rest = (text or "")[m.end():].strip()
-    try:
-        mid = int(m.group(1))
-    except ValueError:
-        return rest, None
+    raw = text or ""
+    m = _REPLY_DIRECTIVE_RE.match(raw)
+    if m:
+        rest = raw[m.end():].strip()
+        try:
+            mid = int(m.group(1))
+        except ValueError:
+            return rest, None
+    else:
+        rest, mid = _reply_directive_below_preamble(raw)
+        if mid is None:
+            return rest, None
     if known_ids is not None and mid not in set(known_ids):
         log.info("ОТВЕТ->#%s не из карты чата — шлю обычным сообщением", mid)
         return rest, None
@@ -8438,7 +8512,9 @@ def _delivery_evidence(run_id: str) -> dict:
 def run_pending_text_deliveries(*, limit: int = 20) -> list[dict]:
     """Return only versioned text plans that can be replayed without an LLM."""
     pending: list[dict] = []
-    for run_id in _runs().run_ids():
+    # live_run_ids отсеивает терминальные без замка: доставлять по ним нечего, а замок
+    # на каждом из 1739 прогонов был главным пожирателем GIL (py-spy 31.07).
+    for run_id in _runs().live_run_ids():
         try:
             manifest = _runs().manifest(run_id)
             if str(manifest.get("status") or "") in run_manager.TERMINAL_STATUSES:
@@ -10505,7 +10581,8 @@ def resume_durable_runs(*, limit: int = 20) -> list[dict]:
     manager = _runs()
     reports: list[dict] = []
     candidates: list[str] = []
-    for run_id in manager.run_ids():
+    # Возобновлять терминальные нечего — отсеиваем их без замка (py-spy 31.07).
+    for run_id in manager.live_run_ids():
         try:
             status = str(manager.manifest(run_id).get("status") or "")
         except Exception:
@@ -10706,7 +10783,8 @@ def reap_orphaned_cognitive_runs() -> list[dict]:
     поднимает его как требующий внимания, а не молча повторяет. Так кладбище зомби не копится
     БЕЗ рестарта, но живой прогон не может быть задет: замок гарантирует его отсутствие."""
     reaped: list[dict] = []
-    for run_id in _runs().run_ids():
+    # Терминальный прогон осиротеть не может — пропускаем его до замка (py-spy 31.07).
+    for run_id in _runs().live_run_ids():
         try:
             manifest = _runs().manifest(run_id)
             if str(manifest.get("status") or "") != "running":

@@ -192,6 +192,44 @@ def _run_runner() -> int:
     return subprocess.run([sys.executable, RUNNER], cwd=str(BASE)).returncode
 
 
+def _reap_orphans() -> int:
+    """Сжать осиротевших внуков: в контейнере супервизор — это PID 1.
+
+    Раннер порождает git, тесты, форж, любой subprocess-тул. Когда раннер умирает
+    (её `restart_self` после смёрженного proposal — рядовое событие), его дети
+    переезжают к PID 1, а PID 1 их никогда не ждал: каждый самоперезапуск оставлял
+    ~200 зомби, и держались они до пересоздания контейнера. Упереться в cgroup
+    `pids.max` означает, что у неё разом и молча отваливаются ВСЕ руки, которым
+    нужен fork — а вылечит это только тот самый разрыв, которого весь контур
+    непрерывности избегает.
+
+    Зовём только там, где своих живых детей у нас нет (сразу после subprocess.run
+    и в паузах ожидания), поэтому `waitpid(-1)` не может украсть код выхода
+    раннера — а на нём висит вся логика отката.
+    """
+    if not hasattr(os, "WNOHANG"):  # не-POSIX: зомби там не бывает
+        return 0
+    reaped = 0
+    # Потолок итераций: осиротевший процесс, который непрерывно порождает и хоронит
+    # детей (обычный `while true` из форж-сессии), иначе удержит нас здесь навсегда —
+    # а вызов стоит между выходом раннера и решением о перезапуске, то есть она бы
+    # просто не поднялась. Остаток сожнём на следующем круге.
+    for _ in range(4096):
+        try:
+            pid, _status = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            break  # детей не осталось вовсе
+        except OSError:
+            log.debug("waitpid осиротевших не удался", exc_info=True)
+            break
+        if pid == 0:
+            break  # дети есть, но все живые
+        reaped += 1
+    if reaped:
+        log.info("сжато осиротевших процессов: %d", reaped)
+    return reaped
+
+
 def run() -> None:
     blocked = boot_blocked_reason(os.environ)
     if blocked:
@@ -212,6 +250,7 @@ def run() -> None:
                 journal("я остановлена (panic). Подниму себя, когда Егор уберёт memory/.panic.")
                 log.warning("PANIC sentinel — простаиваю, жду снятия (%s)", PANIC_SENTINEL)
                 panicked = True
+            _reap_orphans()
             time.sleep(stuck_sleep)
             continue
         panicked = False
@@ -229,6 +268,7 @@ def run() -> None:
                 continue
             journal(f"моя правка {head} не проходит preflight ({err}), а откатываться некуда — "
                     f"нужна твоя рука, Егор.")
+            _reap_orphans()
             time.sleep(stuck_sleep)
             continue
 
@@ -237,6 +277,8 @@ def run() -> None:
         log.info("launch runner @ %s", launch_sha)
         rc = _run_runner()
         elapsed = time.time() - start
+        # Раннер уже сжат самим subprocess.run — здесь остаются только его осиротевшие дети.
+        _reap_orphans()
 
         d = decide_after(rc, elapsed, launch_sha, state.get("last_good"),
                          int(state.get("early_fails", 0)), grace, max_fails)

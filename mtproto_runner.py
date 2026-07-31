@@ -2837,6 +2837,39 @@ async def _maybe_compact(chat_id: str) -> None:
         _compacting.discard(place)
 
 
+_PULSE_RETRY_AT = 0.0  # эпоха, когда отложенное пульсовое окно просится обратно; 0 — не просится
+
+
+def _pulse_retry_sec() -> float:
+    """Через сколько отложенное живым ходом пульсовое окно пробует снова.
+
+    Тик часов — 2 секунды, а каждая попытка пересобирает контекст пульса, поэтому
+    «на следующем тике» здесь было бы молотьбой."""
+    try:
+        return max(0.0, float(os.getenv("PRAXIS_PULSE_RETRY_SEC", "120")))
+    except (TypeError, ValueError):
+        return 120.0
+
+
+def _request_pulse_retry(now: float | None = None) -> float:
+    """Заявка на возврат отложенного окна. Ставит её ТОЛЬКО тот, кого реально отложили.
+
+    Часы могли бы вместо этого сверяться с durable-сроком пульса — но «пульс due» верно
+    и тогда, когда он сам решил не открываться: в окне сна `_social_pulse_once`
+    возвращается ДО `begin()`, и срок остаётся due всю ночь. Часы бы будили её каждые
+    две минуты до утра и засыпали её же perception-skips. Явная заявка отличает
+    «меня отложили» от «я не пошла», а обратный скачок системных часов не превращает
+    это в вечный холостой цикл."""
+    global _PULSE_RETRY_AT
+    _PULSE_RETRY_AT = float(now if now is not None else time.time()) + _pulse_retry_sec()
+    return _PULSE_RETRY_AT
+
+
+def _clear_pulse_retry() -> None:
+    global _PULSE_RETRY_AT
+    _PULSE_RETRY_AT = 0.0
+
+
 async def _note_one_mind_defer(stage: str, goal: str) -> None:
     """Отложенное пробуждение обязано быть ВИДНЫМ ей, а не только в логе.
 
@@ -2855,7 +2888,7 @@ async def _note_one_mind_defer(stage: str, goal: str) -> None:
         await asyncio.to_thread(
             lambda: perception.note_skip(
                 f"one_mind:{stage}", "отложила",
-                detail=f"занята живым ходом, вернусь следующим тиком: {(goal or '')[:80]}"))
+                detail=f"занята живым ходом, вернусь как освободится: {(goal or '')[:80]}"))
     except Exception:
         log.debug("skip отложенного пробуждения не записался", exc_info=True)
 
@@ -2889,9 +2922,12 @@ async def _task_window(goal: str, *, mailbox_index: str | None = None,
 
     -> True/False по исходу, None если замок занят живым ходом (пульс тогда отложится)."""
     if _ONE_MIND.locked():
-        # Она одна: идёт живой ход — окно не открываем поверх него. Часы не блокируем,
-        # вернёмся на следующем тике (для пульса due-state сохранён, второго пробуждения нет).
-        log.info("ТАСК-ОКНО отложено: занята живым ходом, вернусь на следующем тике — %s",
+        # Она одна: идёт живой ход — окно не открываем поверх него. Часы не блокируем.
+        # Формулировка нарочно без числа: у этой функции два вызывающих с разными
+        # сроками возврата (пульс — по заявке `_request_pulse_retry`, разовые
+        # focus/rest/coding — со своего тика планировщика), и обещать одному срок
+        # другого значит соврать ей в её же журнале.
+        log.info("ТАСК-ОКНО отложено: занята живым ходом, вернусь как освободится — %s",
                  (goal or "")[:80])
         await _note_one_mind_defer("task_window", goal)
         return None
@@ -5516,6 +5552,12 @@ async def _run_social_pulse(pulse_id: str) -> None:
                     social_pulse.defer, pulse_id,
                     detail="task window deferred while another authored turn was active",
                 )
+                # Её ЕДИНСТВЕННОЕ регулярное автономное пробуждение. `defer` вернул
+                # durable claim, но часы уже перевзвели срок на период вперёд — без
+                # заявки окно теряется на час (15% пробуждений, 25 из 168 по леджеру).
+                retry_at = _request_pulse_retry()
+                log.info("ПУЛЬС отложен живым ходом — вернусь через %.0fс",
+                         max(0.0, retry_at - time.time()))
                 return
             ok = outcome
     finally:
@@ -6112,12 +6154,24 @@ def _clock_initial_deadlines(now: float, jobs: dict) -> dict[str, float]:
 async def _clock_pass(now: float, next_at: dict, jobs: dict) -> list[str]:
     """Один удар часов: выполнить созревшие заботы, перевзвести их сроки. -> имена сработавших.
 
-    Упавшая забота логируется и не мешает остальным; её срок всё равно перевзводится."""
+    Упавшая забота логируется и не мешает остальным; её срок всё равно перевзводится.
+
+    Пульс с заявкой на возврат (`_request_pulse_retry`) обслуживается раньше своего
+    срока: окно, отложенное живым ходом, иначе ждало бы ЦЕЛЫЙ ПЕРИОД, хотя её леджер
+    считает такое окно всего лишь отложенным."""
     fired = []
     for name, (period, care) in jobs.items():
-        if period <= 0 or now < next_at.get(name, 0.0):
+        if period <= 0:
+            continue
+        due_at = float(next_at.get(name, 0.0))
+        if name == "social_pulse" and _PULSE_RETRY_AT:
+            due_at = min(due_at, _PULSE_RETRY_AT)
+        if now < due_at:
             continue
         next_at[name] = now + period
+        if name == "social_pulse":
+            # Попытка делается сейчас; если её снова отложат — заявка встанет заново.
+            _clear_pulse_retry()
         fired.append(name)
         try:
             await care()
@@ -6198,6 +6252,22 @@ def _warm_media() -> None:
         log.info("прогрев медиа-моделей на буте (whisper+piper резидентно): %s", result)
     except Exception:
         log.warning("прогрев медиа-моделей упал (не критично — подхватится лениво)", exc_info=True)
+
+
+async def _start_shared_stt():
+    """Expose the same process-local Whisper object over an authenticated UDS."""
+
+    try:
+        import media_audio
+        import stt_rpc
+
+        backend = media_audio.get_default_backend().stt
+        return await stt_rpc.start_from_env(backend)
+    except Exception as exc:
+        # The endpoint is optional and must not take the Telegram runtime down.
+        # Keep OS paths and any secret-adjacent exception text out of the log.
+        log.error("shared STT unavailable error_type=%s", type(exc).__name__)
+        return None
 
 
 async def main() -> None:
@@ -6291,14 +6361,19 @@ async def main() -> None:
         resumed_runs = await asyncio.to_thread(agent.resume_durable_runs, limit=20)
     if resumed_runs:
         log.warning("обработано executable durable resumes: %d", len(resumed_runs))
-    log.info("Praxis на связи как @%s (id %s). мозг: %s; owner=%s комнат=%d "
-             "last_n=%d дебаунс=%.0fs кулдаун dm/grp=%.0f/%.0f",
-             me.username, me.id, llm.state_line() or "не настроен",
-             OWNER_ID or "—", len(rooms.allowed_chats()), LAST_N, DEBOUNCE_SEC, COOLDOWN_DM, COOLDOWN_GROUP)
-    _install_dead_room_filter()  # 10.8: banned/private-каналы → mode=dead, лог не спамится
-    asyncio.create_task(_clock())  # PASS 4: буферы/расписание/«сон»/сердцебиение — один тик
-    asyncio.create_task(_missed_dm_sweep())  # PASS 9.0: догнать ЛС, оборванные рестартом
-    await _supervise_connection()
+    shared_stt = await _start_shared_stt()
+    try:
+        log.info("Praxis на связи как @%s (id %s). мозг: %s; owner=%s комнат=%d "
+                 "last_n=%d дебаунс=%.0fs кулдаун dm/grp=%.0f/%.0f",
+                 me.username, me.id, llm.state_line() or "не настроен",
+                 OWNER_ID or "—", len(rooms.allowed_chats()), LAST_N, DEBOUNCE_SEC, COOLDOWN_DM, COOLDOWN_GROUP)
+        _install_dead_room_filter()  # 10.8: banned/private-каналы → mode=dead, лог не спамится
+        asyncio.create_task(_clock())  # PASS 4: буферы/расписание/«сон»/сердцебиение — один тик
+        asyncio.create_task(_missed_dm_sweep())  # PASS 9.0: догнать ЛС, оборванные рестартом
+        await _supervise_connection()
+    finally:
+        if shared_stt is not None:
+            await shared_stt.stop()
 
 
 if __name__ == "__main__":

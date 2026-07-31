@@ -168,7 +168,11 @@ def observability(pulse_id: str, *, now: float | None = None,
     with _LOCK:
         runs = list(_load(path).get("runs") or [])
     current = next((run for run in reversed(runs) if run.get("id") == pulse_id), None)
-    previous = next((run for run in reversed(runs) if run.get("id") != pulse_id), None)
+    # «Предыдущий» — последний РЕАЛЬНО открывавшийся прогон: отложенное окно не
+    # открывалось, и мерить от него «сколько часов прошло с прошлого раза» значит
+    # рассказывать ей о себе неправду.
+    previous = next((run for run in reversed(runs)
+                     if run.get("id") != pulse_id and run.get("status") != "deferred"), None)
 
     def started_at(run: dict | None) -> float:
         try:
@@ -178,9 +182,18 @@ def observability(pulse_id: str, *, now: float | None = None,
 
     today = local_now.date()
     started_today = 0
+    deferred_today = 0
     for run in runs:
         started = started_at(run)
-        if started and _local_datetime(started).date() == today:
+        if not started or _local_datetime(started).date() != today:
+            continue
+        # Отложенное окно — не пробуждение. Считать его в «сколько раз я сегодня
+        # просыпалась» значит завысить ей её же активность; а отсрочки при этом обязаны
+        # быть видны отдельным числом, а не молча (контракт R1: гейт может существовать,
+        # молча — нет).
+        if run.get("status") == "deferred":
+            deferred_today += 1
+        else:
             started_today += 1
     current_started = started_at(current)
     previous_started = started_at(previous)
@@ -192,6 +205,7 @@ def observability(pulse_id: str, *, now: float | None = None,
         "hours_since_previous_started": round(max(0.0, at - previous_started) / 3600, 2)
         if previous_started else None,
         "started_today": started_today,
+        "deferred_today": deferred_today,
         "previous_status": previous.get("status") if previous else None,
         "note": "social-pulse receipts only; history is context, not a gate",
     }
@@ -229,9 +243,15 @@ def defer(pulse_id: str, *, detail: str = "", now: float | None = None,
                 run.update(status="deferred", finished_at=at,
                            detail=str(detail or "")[:500])
                 break
+        # Клейм возвращаем на последний прогон, который РЕАЛЬНО открывался. Отложенные
+        # окна не открывались никогда, и если считать их «предыдущим», то второй отказ
+        # подряд двигает claim вперёд на фантом — и пульс уезжает на целый период, хотя
+        # он ни разу не отработал. (Первый отказ при этом выглядел исправным, поэтому
+        # шов и держался: ломается только серия отказов, то есть длинный живой ход.)
         previous = next(
             (run for run in reversed(state["runs"])
-             if run.get("id") != pulse_id and run.get("started_at")),
+             if run.get("id") != pulse_id and run.get("started_at")
+             and run.get("status") != "deferred"),
             None,
         )
         state["last_started_at"] = float((previous or {}).get("started_at") or 0.0)

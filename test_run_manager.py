@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from run_context import RunContext
-from run_manager import InvalidTransition, RunConflict, RunError, RunManager
+from run_manager import InvalidTransition, RunConflict, RunError, RunManager, life_event_promotion
 
 
 class RunManagerBase(unittest.TestCase):
@@ -547,6 +547,42 @@ class TestFullResultsAndArtifacts(RunManagerBase):
 
 
 class TestRecapPromotion(RunManagerBase):
+    def test_life_promotion_preserves_artifact_receipt_independently_of_delivery(self):
+        ctx = self.create("artifact-promotion")
+        self.manager.transition(ctx.run_id, "running")
+        artifact = self.manager.store_artifact(
+            ctx.run_id, b"verified bytes", name="result.bin",
+            idempotency_key="result", expected_sha256=hashlib.sha256(b"verified bytes").hexdigest(),
+            expected_size=len(b"verified bytes"),
+        )
+        self.manager.transition(ctx.run_id, "done", reason="artifact exists")
+        manifest = self.manager.manifest(ctx.run_id)
+        recap_path = self.manager.path(ctx.run_id) / "RECAP.md"
+        recap_path.write_text("# Recap\n", encoding="utf-8")
+
+        rows: list[dict] = []
+
+        def append_event(kind: str, **kwargs):
+            row = {"id": f"evt-{len(rows) + 1}", "kind": kind, **kwargs}
+            rows.append(row)
+            return row
+
+        with mock.patch("memory_life.append_event", side_effect=append_event), \
+                mock.patch("memory_life.iter_events", side_effect=lambda kinds=None: list(rows)):
+            first = life_event_promotion(ctx, recap_path, manifest)
+            second = life_event_promotion(ctx, recap_path, manifest)
+
+        receipts = [row for row in rows if row["kind"] == "artifact_receipt"]
+        episodes = [row for row in rows if row["kind"] == "run_episode"]
+        self.assertEqual(first, second)
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(len(episodes), 1)
+        self.assertEqual(receipts[0]["source"], "forge")
+        self.assertEqual(receipts[0]["source_id"], f"{ctx.run_id}:{artifact['artifact_id']}")
+        self.assertEqual(receipts[0]["meta"]["sha256"], artifact["sha256"])
+        self.assertEqual(receipts[0]["meta"]["size"], artifact["size"])
+        self.assertEqual(episodes[0]["refs"], (receipts[0]["id"],))
+
     def test_recap_and_promotion_are_idempotent(self):
         calls: list[str] = []
 

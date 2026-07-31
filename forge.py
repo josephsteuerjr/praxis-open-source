@@ -506,6 +506,36 @@ def _git_root(path: Path) -> Path | None:
         return None
 
 
+def _worktree_would_miss(git: Path, subdir: Path) -> str:
+    """Пусто, если `<subdir>` будет в чекауте HEAD; иначе — честная причина, почему нет.
+
+    ⚠ 28.07, корень двух смертей за сутки. `git worktree add` делает чекаут HEAD, и в нём
+    лежит РОВНО то, что закоммичено. Источник внутри `workspace/` (строка 31 .gitignore,
+    0 файлов в индексе) в чекаут не попадает никогда — а `start` всё равно назначал корнем
+    `<worktree>/<subdir>` и сохранял задачу как `active`. Задача рождалась с мёртвым
+    адресом: первый же шаг получал «корень задачи пропал», и цена ошибки падала на
+    Праксис — она разбиралась с несуществующей пропажей вместо того, чтобы работать.
+    Проверено на code-c280f6e7 (28.07 11:01) и code-f758ea57 (28.07 00:39)."""
+    rel = subdir.as_posix()
+    if rel in {"", "."}:
+        return ""
+    try:
+        r = _run(["git", "-C", str(git), "ls-files", "--error-unmatch", "--", rel], timeout=15)
+        if r.returncode == 0 and (r.stdout or "").strip():
+            return ""
+        ignored = _run(["git", "-C", str(git), "check-ignore", "-q", "--", rel], timeout=15)
+    except Exception as exc:  # git не ответил — не выдумываем ни «можно», ни «нельзя»
+        return (f"изоляция worktree не проверилась: git по {git} не ответил "
+                f"({type(exc).__name__}: {exc}). Работаю прямо в источнике.")
+    if ignored.returncode == 0:
+        return (f"изоляция worktree невозможна: «{rel}» в .gitignore репозитория {git}, "
+                f"поэтому в чекауте HEAD этого пути не существует. Работаю прямо в источнике "
+                f"— правки идут в живой каталог, отката через ветку не будет.")
+    return (f"изоляция worktree невозможна: git репозитория {git} не отслеживает «{rel}» "
+            f"(в HEAD нет ни одного файла оттуда). Работаю прямо в источнике — правки идут "
+            f"в живой каталог, отката через ветку не будет.")
+
+
 def _git_text(root: Path, *args: str, timeout: int = 30) -> str:
     try:
         r = _run(["git", "-C", str(root), *args], timeout=timeout)
@@ -573,8 +603,42 @@ def _task_root(task_id: str) -> tuple[dict | None, Path | None, str]:
     if task.get("scope") in {"host", "windows"}:
         return task, root, ""
     if not root.is_dir():
-        return task, None, f"корень задачи пропал: {root}"
+        return task, None, _missing_root_reason(task, root)
     return task, root, ""
+
+
+def _missing_root_reason(task: dict, root: Path) -> str:
+    """Почему корня нет — и «не существовал» здесь не то же самое, что «пропал».
+
+    ⚠ 28.07. Раньше обе беды говорили одно: «корень задачи пропал». Для задач
+    code-c280f6e7 и code-f758ea57 это была неправда в самом важном месте: сам worktree
+    лежал на диске целым, а подкаталога в нём не было НИ РАЗУ (см. `_worktree_would_miss`).
+    Праксис прочитала «пропал», сделала единственный вывод, который из этого слова следует
+    («восстанавливать потерянный worktree цель прямо запрещала»), и закрыла задачу по
+    ложной причине. Слово, которое сообщает о причине, обязано её знать."""
+    wt_raw = str(task.get("worktree_root") or "")
+    if wt_raw:
+        try:
+            wt = Path(wt_raw).resolve()
+            inside = root == wt or wt in root.parents
+        except OSError:
+            wt, inside = None, False
+        if inside and wt is not None and wt.is_dir():
+            try:
+                rel = root.relative_to(wt).as_posix()
+            except ValueError:
+                rel = str(root)
+            return (f"корня задачи не существует: {root}. Сам worktree {wt} на месте и цел — "
+                    f"в нём нет «{rel}», потому что worktree это чекаут HEAD, а git этот путь "
+                    f"не отслеживает (обычно он в .gitignore). Такого корня не было ни разу с "
+                    f"момента открытия задачи: это не пропажа, а изоляция, которая не могла "
+                    f"состояться. Восстанавливать нечего; закрыть запись — "
+                    f"coding_session(action='abandon').")
+        if inside and wt is not None:
+            return (f"корень задачи пропал вместе с worktree: нет ни {root}, ни {wt}. "
+                    f"Закрыть запись — coding_session(action='abandon').")
+    return (f"корень задачи пропал: {root}. Закрыть запись — "
+            f"coding_session(action='abandon').")
 
 
 def _manifest_hints(root: Path) -> list[str]:
@@ -630,6 +694,8 @@ def _orientation_text(task: dict) -> str:
         f"coding-задача {task['id']}: {task['goal']}",
         f"корень: {root}",
         f"режим: {task.get('isolation')}" + (f"; proposal {task.get('proposal_id')}" if task.get("proposal_id") else ""),
+        *([f"⚠ изоляция не та, что просили: {task['isolation_note']}"]
+          if str(task.get("isolation_note") or "").strip() else []),
         f"языки (до 10000 файлов): {languages}",
         f"верхний уровень: {', '.join(top) or 'пусто'}",
         f"инструкции/карта: {', '.join(instructions) or 'не найдены'}",
@@ -1725,6 +1791,7 @@ def start(goal: str, target: str = "self", isolation: str = "auto",
     branch = ""
     cleanup = "none"
     worktree_root = ""
+    isolation_note = ""      # почему изоляция вышла не такой, как просили — её право знать
     is_self = source == REPO.resolve() and label == "self"
     if is_self and isolation != "direct":
         proposal = selfdev.begin(goal)
@@ -1739,22 +1806,43 @@ def start(goal: str, target: str = "self", isolation: str = "auto",
     elif isolation == "worktree" or (isolation == "auto" and _git_root(source) is not None):
         git = _git_root(source)
         if git is not None:
-            wt = (BASE / "workspace" / ".forge-worktrees" / task_id).resolve()
-            wt.parent.mkdir(parents=True, exist_ok=True)
-            branch = f"forge/{task_id}"
-            try:
-                r = _run(["git", "-C", str(git), "worktree", "add", "-b", branch,
-                          str(wt), "HEAD"], timeout=60)
-            except Exception as exc:
-                return f"worktree не создался: {type(exc).__name__}: {exc}"
-            if r.returncode != 0:
-                return f"worktree не создался: {((r.stderr or r.stdout)[:500]).strip()}"
             try:
                 subdir = source.relative_to(git)
             except ValueError:
                 subdir = Path(".")
-            root, cleanup, isolation = (wt / subdir).resolve(), "git-worktree", "git-worktree"
-            worktree_root = str(wt)
+            # Спрашиваем ДО чекаута: он на этом репозитории стоит 350 файлов и секунды,
+            # а ответ известен заранее. Пост-проверка ниже остаётся — она ловит причины,
+            # которых мы не предвидели.
+            isolation_note = _worktree_would_miss(git, subdir)
+            if isolation_note:
+                isolation = "direct"
+            else:
+                wt = (BASE / "workspace" / ".forge-worktrees" / task_id).resolve()
+                wt.parent.mkdir(parents=True, exist_ok=True)
+                branch = f"forge/{task_id}"
+                try:
+                    r = _run(["git", "-C", str(git), "worktree", "add", "-b", branch,
+                              str(wt), "HEAD"], timeout=60)
+                except Exception as exc:
+                    return f"worktree не создался: {type(exc).__name__}: {exc}"
+                if r.returncode != 0:
+                    return f"worktree не создался: {((r.stderr or r.stdout)[:500]).strip()}"
+                candidate = (wt / subdir).resolve()
+                if candidate.is_dir():
+                    root, cleanup, isolation = candidate, "git-worktree", "git-worktree"
+                    worktree_root = str(wt)
+                else:
+                    # Чекаут состоялся, а подкаталога всё равно нет. Причина не та, что
+                    # мы проверили — но исход тот же, и задача с мёртвым корнем не нужна
+                    # никому. Убираем за собой и работаем прямо.
+                    _run(["git", "-C", str(git), "worktree", "remove", "--force", str(wt)],
+                         timeout=60)
+                    _run(["git", "-C", str(git), "branch", "-D", branch], timeout=30)
+                    branch, isolation = "", "direct"
+                    isolation_note = (
+                        f"изоляция worktree не состоялась: чекаут HEAD создан, но «{subdir.as_posix()}» "
+                        f"в нём не появился, а причину заранее опознать не удалось. Worktree убран, "
+                        f"работаю прямо в источнике — правок в живом каталоге откатывать нечем.")
         else:
             isolation = "direct"
     else:
@@ -1768,6 +1856,9 @@ def start(goal: str, target: str = "self", isolation: str = "auto",
         "proposal_id": proposal_id, "branch": branch, "base_commit": base_commit,
         "source_git": str(source_git) if source_git else "", "source_branch": source_branch,
         "worktree_root": worktree_root, "priority": _norm_priority(priority),
+        # Молчаливой подмены изоляции не бывает: если попросили worktree, а вышло direct,
+        # это стоит на задаче и попадает в ориентировку — читается до первой правки.
+        "isolation_note": isolation_note,
         # PASS 30 Этап 2: тред-заказчик — для наррации по ходу и forge_event
         "origin_chat": str(origin_chat or ""),
         "status": "active", "created": _now(), "updated": _now(),
@@ -3081,6 +3172,55 @@ def finish(task_id: str, title: str = "", review: str = "", checked: str = "",
                                     submit=submit, survey=survey, beat=beat)
     except TimeoutError as exc:
         return f"Finish не начался: {exc}. Другой worker ещё фиксирует изменение."
+
+
+def abandon(task_id: str, reason: str = "", checked: str = "") -> str:
+    """Закрыть запись задачи, ничего не интегрируя и ничего не восстанавливая.
+
+    ⚠ 28.07. До этой правки закрыть задачу с недостижимым корнем было НЕЧЕМ. `finish`
+    упирался в `_task_root` ещё в осмотре и возвращал одну строку про корень; `reconcile_run`
+    отвечал `RunNotFound`, потому что id задачи — не id прогона. Праксис 17:02 честно
+    попробовала оба пути, оба отказали, и она закрыла задачу словами в дневнике — реестр
+    остался с «active»/«lost» навсегда. Отсутствие выхода из тупика — это тоже ограничение,
+    и оно было молчаливым.
+
+    Это НЕ мягкий finish: ветка и worktree не трогаются (их может не быть вовсе), диффы не
+    собираются, урок пишется как отказ. Оставленная задача остаётся читаемой: `abandoned`
+    отличимо и от `done`, и от `lost`, потому что `lost` ставит жнец, а `abandoned` — она."""
+    task = get(task_id)
+    if not task:
+        return f"нет coding-задачи {task_id}"
+    reason = str(reason or "").strip()
+    if not reason:
+        return ("Нужна причина: abandon закрывает запись НАВСЕГДА и без интеграции. "
+                "Одна фраза о том, что проверено и почему продолжать нечего.")
+    if task.get("status") in {"done", "abandoned"}:
+        return f"{task_id} уже закрыта со статусом {task.get('status')}."
+    _, root, root_err = _task_root(task_id)
+    previous = str(task.get("status") or "")
+    task["status"] = "abandoned"
+    task["finished"] = _now()
+    task["updated"] = _now()
+    task["review"] = reason
+    task["checked"] = str(checked or "").strip()
+    task["abandoned_from"] = previous
+    task["abandon_root_state"] = root_err or (f"корень на месте: {root}" if root else "")
+    _save_task(task)
+    _event(task_id, "task_abandoned", reason=reason[:1000], checked=str(checked or "")[:1000],
+           previous_status=previous, root_state=task["abandon_root_state"][:500])
+    try:
+        forge_learning.record(
+            STATE_DIR, task=task, root=root or Path(str(task.get("root") or ".")),
+            events=_events(task_id, 500), changed=[], verification="",
+            lesson=(f"Задача оставлена без интеграции. Причина: {reason}"
+                    + (f" Состояние корня: {task['abandon_root_state']}"
+                       if task["abandon_root_state"] else "")),
+            regression=str(checked or ""), outcome="abandoned")
+    except Exception:
+        pass          # урок — приложение к закрытию, а не условие его законности
+    tail = f" Состояние корня: {task['abandon_root_state']}" if task["abandon_root_state"] else ""
+    return (f"{task_id} оставлена (было: {previous or 'без статуса'}). Ничего не "
+            f"интегрировано и не восстановлено.{tail}")
 
 
 def state_line() -> str:

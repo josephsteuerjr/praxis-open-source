@@ -9,9 +9,11 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -119,6 +121,28 @@ class TestRollbackJournal(unittest.TestCase):
         jtext = "".join(p.read_text(encoding="utf-8") for p in bg.JOURNAL_DIR.glob("*.md"))
         self.assertIn("[boot]", jtext)
         self.assertIn("git show abc123", jtext)
+
+
+class TestReapOrphans(unittest.TestCase):
+    """Супервизор — PID 1 в контейнере: без wait() дети умершего раннера копятся
+    зомби до упора в cgroup pids.max, и тогда у неё отваливаются все руки с fork."""
+
+    @unittest.skipUnless(hasattr(os, "fork") and hasattr(os, "WNOHANG"), "только POSIX")
+    def test_collects_dead_child(self):
+        pid = os.fork()
+        if pid == 0:  # ребёнок: умереть сразу и не трогать состояние теста
+            os._exit(0)
+        for _ in range(50):
+            if bg._reap_orphans() >= 1:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("зомби не сжат за 5 секунд")
+        # Второй заход не должен ни падать, ни находить того же покойника дважды.
+        self.assertEqual(bg._reap_orphans(), 0)
+
+    def test_quiet_without_children(self):
+        self.assertIsInstance(bg._reap_orphans(), int)
 
 
 if __name__ == "__main__":

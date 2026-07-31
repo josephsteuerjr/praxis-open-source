@@ -22,6 +22,7 @@
 | `brain.py`, `appetite.py` | Наблюдаемый выбор model role и учёт/интерпретация вычислительного аппетита без скрытого veto. |
 | `media.py` | Typed inbound/outbound media, guarded spool, durable media receipts и cleanup. |
 | `media_audio.py` | Local STT и TTS backends с атомарными аудио-артефактами. |
+| `stt_rpc.py` | Authenticated HTTP-over-UDS адаптер для bounded hardbot STT; переиспользует resident Whisper из `mtproto_runner.py`, удаляет private temp audio и не персистит transcript. |
 
 ## Durable runs и Telegram side effects
 

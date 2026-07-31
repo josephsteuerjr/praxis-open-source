@@ -177,6 +177,48 @@ class MediaAudioTests(unittest.TestCase):
             backend.transcribe(oversized)
         self.assertFalse(loaded)
 
+    def test_external_stt_requires_resident_model_and_uses_praxis_profile(self) -> None:
+        input_path = self.root / "shared.ogg"
+        input_path.write_bytes(b"voice")
+        fake_model = FakeWhisperModel()
+        backend = media_audio.FasterWhisperSTT(
+            self.config,
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+
+        self.assertFalse(backend.is_loaded)
+        with self.assertRaises(media_audio.AudioNotReadyError):
+            backend.transcribe_external(input_path, language=None)
+        self.assertFalse(backend.is_loaded, "RPC must never trigger a model load")
+
+        backend._get_model()
+        self.assertTrue(backend.is_loaded)
+        result = backend.transcribe_external(
+            input_path,
+            language="uz",
+        )
+        self.assertEqual(result, "Привет, это Пракс.")
+        _, kwargs = fake_model.calls[-1]
+        self.assertEqual(kwargs["language"], "uz")
+        self.assertEqual(kwargs["beam_size"], self.config.stt_beam_size)
+
+    def test_external_stt_never_queues_behind_the_inference_worker(self) -> None:
+        input_path = self.root / "shared.ogg"
+        input_path.write_bytes(b"voice")
+        backend = media_audio.FasterWhisperSTT(
+            self.config,
+            model_factory=lambda *_args, **_kwargs: FakeWhisperModel(),
+        )
+        backend._get_model()
+        self.assertTrue(backend._run_lock.acquire(blocking=False))
+        try:
+            self.assertTrue(backend.is_busy)
+            with self.assertRaises(media_audio.AudioBusyError):
+                backend.transcribe_external(input_path, language="ru")
+        finally:
+            backend._run_lock.release()
+        self.assertFalse(backend.is_busy)
+
     def test_constrained_deploy_releases_turbo_model_after_each_file(self) -> None:
         input_path = self.root / "voice.ogg"
         input_path.write_bytes(b"voice")

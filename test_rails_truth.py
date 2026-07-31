@@ -255,8 +255,8 @@ INVENTORY: dict[str, tuple[str, ...]] = {
     "credential_floor": ("твёрдое",),
     # полные права на Windows-ПК Егора + парный гейт делегирования
     "windows_body_authority": ("admit", "computer_access"),
-    # внешняя GitHub-аутентификация host-руки — без вшитого логина и credential-path
-    "github_identity": ("gh", "непосредственно перед действием"),
+    # залогиненная GitHub-личность Егора в HOME её root-руки
+    "github_identity": ("gh", "josephsteuerjr"),
     # намерение гаснет по факту созданного прогона
     "intent_claim": ("прогон",),
     # замок мутации форжа и его порог.
@@ -1436,8 +1436,7 @@ class TestRetractedPromises(Base):
         row = self.rail("github_identity")
         self.assertEqual(row["cls"], rails.CLS_OWNER,
                          "чужая личность в её руках — решение владельца, не её дисциплина")
-        self.assertNotIn("HOME=/root", self.text("github_identity"))
-        self.assertGreater(len(self.text("github_identity")), 40)
+        self.assertIn("HOME=/root", self.text("github_identity"))
 
 
 class TestCapabilitiesTellTheTruth(Base):

@@ -86,6 +86,26 @@ class ComputerMemoryCase(unittest.TestCase):
         )
         self.assertEqual(projections, {path: path.read_bytes() for path in projections})
 
+    def test_recent_artifact_evidence_is_bounded_and_ignores_non_artifacts(self):
+        self.assertEqual(computer_memory.recent_artifact_evidence(), [])
+        computer_memory.record(
+            self.task, "fs.stat", {"path": self.task["root"]}, "interactive",
+            {"ok": True, "kind": "directory", "sha256": "b" * 64},
+        )
+        self.assertEqual(computer_memory.recent_artifact_evidence(), [])
+
+        row = computer_memory.record(
+            {**self.task, "id": "run-direct-artifact"}, "artifact.fetch", {}, "interactive",
+            {"ok": True, "artifact": {"name": "report.txt", "size": 7,
+                                      "sha256": "a" * 64}},
+        )
+        evidence = computer_memory.recent_artifact_evidence(limit=1)
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0]["artifacts"][0]["name"], "report.txt")
+        self.assertEqual(evidence[0]["artifacts"][0]["sha256"], "a" * 64)
+        self.assertEqual(evidence[0]["receipt"], row["receipt"])
+        self.assertNotIn("delivery", evidence[0])
+
     def test_finish_promotes_one_idempotent_life_episode(self):
         computer_memory.record(
             self.task, "fs.stat", {"path": self.task["root"]}, "interactive",

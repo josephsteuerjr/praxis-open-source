@@ -21,6 +21,53 @@ const CODEX_USER_AGENT: &str = "codex_cli_rs/0.144.0";
 // Efforts the Responses API can accept; anything else is dropped rather than sent.
 const REASONING_EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
 
+/// Decode one SSE chunk, carrying an *incomplete* trailing UTF-8 sequence over to the
+/// next chunk instead of mangling it.
+///
+/// A multi-byte character (any Cyrillic letter is two bytes) can be split across a
+/// chunk boundary. The previous code ran `from_utf8_lossy` per chunk, so the split
+/// character became two U+FFFD — silently rewriting the model's words on the way out,
+/// ~100 times an hour on a Russian-speaking client. The carry is a valid prefix of a
+/// UTF-8 sequence, so it is at most 3 bytes and cannot grow.
+///
+/// Genuinely invalid bytes (`error_len() == Some`) are still replaced with U+FFFD and
+/// reported — that is a real upstream defect, not a boundary artifact.
+fn decode_stream_chunk(bytes: &[u8], carry: &mut Vec<u8>) -> String {
+    let mut pending = std::mem::take(carry);
+    pending.extend_from_slice(bytes);
+
+    let mut out = String::with_capacity(pending.len());
+    let mut rest: &[u8] = &pending;
+    loop {
+        match std::str::from_utf8(rest) {
+            Ok(s) => {
+                out.push_str(s);
+                break;
+            }
+            Err(e) => {
+                let valid_up_to = e.valid_up_to();
+                if let Ok(s) = std::str::from_utf8(&rest[..valid_up_to]) {
+                    out.push_str(s);
+                }
+                match e.error_len() {
+                    // Truncated tail: hold it back, the rest of the character is in the next chunk.
+                    None => {
+                        carry.extend_from_slice(&rest[valid_up_to..]);
+                        break;
+                    }
+                    // Actually broken bytes: mark and continue past them.
+                    Some(bad) => {
+                        println!("⚠️  UTF-8 error: {}, dropping {} invalid byte(s)", e, bad);
+                        out.push('\u{FFFD}');
+                        rest = &rest[valid_up_to + bad..];
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 // ~60 words instead of ~5k tokens of Codex-CLI coding-agent instructions per call.
 // The client's real system prompt travels in the input as a <system> user message;
 // this stub only anchors that contract.  Used when RELAY_INSTRUCTIONS=minimal, with
@@ -467,6 +514,8 @@ pub async fn stream_chat_completions(
         // Handle streaming response with proper SSE buffering
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
+        // Holds a character split across a chunk boundary (see decode_stream_chunk).
+        let mut utf8_carry: Vec<u8> = Vec::new();
 
         // Deduplication: Track last sent content
         let mut last_sent_content: Option<String> = None;
@@ -500,15 +549,7 @@ pub async fn stream_chat_completions(
                 }
             };
 
-            let chunk_str = match String::from_utf8(chunk.to_vec()) {
-                Ok(s) => s,
-                Err(e) => {
-                    // Try to recover by using lossy UTF-8 conversion
-                    let lossy_str = String::from_utf8_lossy(&chunk);
-                    println!("⚠️  UTF-8 error: {}, using lossy conversion", e);
-                    lossy_str.to_string()
-                }
-            };
+            let chunk_str = decode_stream_chunk(&chunk, &mut utf8_carry);
 
             // Add chunk to buffer
             buffer.push_str(&chunk_str);
@@ -1054,6 +1095,66 @@ async fn get_account_id(config: &Config) -> Result<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn carries_cyrillic_split_across_chunk_boundary() {
+        // "привет" — every letter is two bytes; cut the stream inside the "и".
+        let text = "привет";
+        let bytes = text.as_bytes();
+        let cut = 3; // middle of the second character
+        let mut carry = Vec::new();
+        let mut out = String::new();
+        out.push_str(&decode_stream_chunk(&bytes[..cut], &mut carry));
+        assert_eq!(carry.len(), 1, "half a character must be held back, not emitted");
+        out.push_str(&decode_stream_chunk(&bytes[cut..], &mut carry));
+        assert_eq!(out, text);
+        assert!(carry.is_empty());
+        assert!(!out.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn carries_across_byte_at_a_time_delivery() {
+        let text = "приятно, что я это ты";
+        let mut carry = Vec::new();
+        let mut out = String::new();
+        for b in text.as_bytes() {
+            out.push_str(&decode_stream_chunk(&[*b], &mut carry));
+        }
+        assert_eq!(out, text);
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn four_byte_sequences_survive_every_split() {
+        let text = "🌍🌏"; // 4 bytes each — exercises the longest carry
+        let bytes = text.as_bytes();
+        for cut in 1..bytes.len() {
+            let mut carry = Vec::new();
+            let mut out = decode_stream_chunk(&bytes[..cut], &mut carry);
+            out.push_str(&decode_stream_chunk(&bytes[cut..], &mut carry));
+            assert_eq!(out, text, "split at byte {} lost data", cut);
+            assert!(carry.is_empty(), "split at byte {} left a carry", cut);
+        }
+    }
+
+    #[test]
+    fn genuinely_invalid_bytes_are_replaced_not_carried() {
+        let mut carry = Vec::new();
+        let mut input = b"ok".to_vec();
+        input.push(0xFF); // never valid in UTF-8
+        input.extend_from_slice("да".as_bytes());
+        let out = decode_stream_chunk(&input, &mut carry);
+        assert_eq!(out, "ok\u{FFFD}да");
+        assert!(carry.is_empty(), "broken bytes must not stall the stream");
+    }
+
+    #[test]
+    fn ascii_only_stream_is_untouched() {
+        let mut carry = Vec::new();
+        let out = decode_stream_chunk(b"data: {\"a\":1}\n\n", &mut carry);
+        assert_eq!(out, "data: {\"a\":1}\n\n");
+        assert!(carry.is_empty());
+    }
 
     #[test]
     fn translates_text_and_image_url_parts_to_responses_content() {

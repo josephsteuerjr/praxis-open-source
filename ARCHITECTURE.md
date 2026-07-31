@@ -23,6 +23,22 @@ Telegram-контур, durable runs, задачи Forge, workers и обучен
 Praxis. LocalSystem service владеет единственным исходящим WSS; пользовательский session host
 получает desktop-envelope через локальный ACL/token-bound pipe.
 
+### Локальный shared STT
+
+`mtproto_runner.py` владеет единственным process-global `media_audio` backend и резидентной
+Whisper-моделью. `stt_rpc.py` не создаёт модель или второй процесс: он поднимает только
+authenticated HTTP-over-UDS listener, передаёт inference тому же backend и немедленно отказывает,
+если модель ещё греется или единый worker занят. TCP listener отсутствует.
+
+Контракт внешнего клиента ограничен `GET /healthz` и `POST /v1/transcriptions` с bearer из
+read-only secret-файла, одним multipart-полем `audio` до 15 MiB и `language=ru|uz|auto`; профиль
+декодирования совпадает со штатным профилем Praxis (`PRAXIS_STT_BEAM_SIZE`, в live-конфигурации
+`5`). Внешний путь отличается только admission-политикой: не загружает модель и не ждёт занятого
+worker. Глобальные burst/rate и single-flight защищают Praxis от очереди внешних работ. Audio
+живёт только в private dedicated tmpfs, удаляется в `finally`, а после смерти дочернего runner —
+exact startup-sweep по собственному prefix; transcript, filename, audio и ошибки декодера в лог
+не попадают.
+
 ## Authority и disclosure
 
 Human-права привязываются к stable numeric principal, а не к имени, username или тексту prompt;

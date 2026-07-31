@@ -139,6 +139,63 @@ class TestClock(unittest.TestCase):
         self.assertEqual(fired, ["social_pulse"])
         self.assertEqual(next_at["social_pulse"], boundary + 3600.0)
 
+    def test_deferred_pulse_returns_by_request_not_a_full_period(self):
+        """Отложенное живым ходом окно возвращается по заявке, а не через период.
+
+        `social_pulse.defer` возвращает durable claim, но часы уже перевзвели срок на
+        час вперёд — и 15% её единственных регулярных автономных пробуждений (25 из 168
+        по её леджеру) терялись, при том что ей писалось «вернусь на следующем тике»."""
+        fired = []
+
+        async def pulse():
+            fired.append("social_pulse")
+
+        jobs = {"social_pulse": (3600.0, pulse)}
+        next_at = {"social_pulse": 4600.0}
+        original = mr._PULSE_RETRY_AT
+        try:
+            retry_at = mr._request_pulse_retry(now=1000.0)
+            self.assertEqual(retry_at, 1000.0 + mr._pulse_retry_sec())
+
+            # Раньше заявки — рано: тик часов 2с, а каждая попытка пересобирает контекст.
+            self._run(mr._clock_pass(retry_at - 1.0, next_at, jobs))
+            self.assertEqual(fired, [])
+
+            self._run(mr._clock_pass(retry_at, next_at, jobs))
+            self.assertEqual(fired, ["social_pulse"], "отложенный пульс не вернулся")
+            self.assertEqual(mr._PULSE_RETRY_AT, 0.0, "заявка должна гаситься попыткой")
+            self.assertEqual(next_at["social_pulse"], retry_at + 3600.0)
+
+            # Без новой заявки — снова обычный период, никакой долбёжки.
+            self._run(mr._clock_pass(retry_at + mr._pulse_retry_sec(), next_at, jobs))
+            self.assertEqual(fired, ["social_pulse"])
+        finally:
+            mr._PULSE_RETRY_AT = original
+
+    def test_pulse_without_request_keeps_its_period(self):
+        """Без заявки часы не трогают срок пульса.
+
+        Это защита от ночной долбёжки: в окне сна `_social_pulse_once` возвращается ДО
+        `begin()`, то есть durable-срок остаётся «due» всю ночь. Если бы часы смотрели
+        на него, а не на заявку, они будили бы её каждые две минуты до утра."""
+        fired = []
+
+        async def pulse():
+            fired.append("social_pulse")
+
+        jobs = {"social_pulse": (3600.0, pulse)}
+        next_at = {"social_pulse": 4600.0}
+        original = mr._PULSE_RETRY_AT
+        try:
+            mr._clear_pulse_retry()
+            for moment in (1000.0, 1120.0, 2000.0, 4599.0):
+                self._run(mr._clock_pass(moment, next_at, jobs))
+            self.assertEqual(fired, [])
+            self._run(mr._clock_pass(4600.0, next_at, jobs))
+            self.assertEqual(fired, ["social_pulse"])
+        finally:
+            mr._PULSE_RETRY_AT = original
+
     def test_durable_resume_care_uses_strict_agent_entrypoint_without_task_window(self):
         called = []
         original_resume = mr.agent.resume_durable_runs

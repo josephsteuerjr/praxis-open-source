@@ -368,6 +368,29 @@ def search(query: str = "", *, task_id: str = "", device_id: str = "", limit: in
     return _rows(" AND ".join(clauses) or "1=1", tuple(params), limit)
 
 
+def recent_artifact_evidence(limit: int = 3) -> list[dict]:
+    """Return bounded durable artifact facts, independent of delivery state."""
+    rows = _rows("artifacts_json <> '[]'", (), max(1, min(int(limit), 10)))
+    evidence = []
+    for row in rows:
+        try:
+            artifacts = json.loads(row.get("artifacts_json") or "[]")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(artifacts, list) or not artifacts:
+            continue
+        evidence.append({
+            "at": row.get("at"),
+            "task_id": row.get("task_id"),
+            "device_id": row.get("device_id"),
+            "capability": row.get("capability"),
+            "status": row.get("status"),
+            "receipt": row.get("receipt"),
+            "artifacts": artifacts,
+        })
+    return evidence
+
+
 def _md_line(row: dict) -> str:
     at = str(row.get("at") or "").replace("T", " ")[:19]
     subject = str(row.get("subject") or "").replace("`", "'").replace("\n", " ")[:180]

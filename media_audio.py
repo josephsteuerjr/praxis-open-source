@@ -44,6 +44,14 @@ class AudioProcessingError(AudioBackendError):
     """A configured backend failed while processing media."""
 
 
+class AudioBusyError(AudioBackendError):
+    """The single inference worker is already serving another request."""
+
+
+class AudioNotReadyError(AudioBackendError):
+    """A caller required the resident model, but warmup has not completed."""
+
+
 def _env_bool(value: str | None, default: bool) -> bool:
     if value is None or not value.strip():
         return default
@@ -234,7 +242,54 @@ class FasterWhisperSTT:
                 ) from exc
             return self._model
 
+    @property
+    def is_loaded(self) -> bool:
+        """Whether the process-local Whisper model is already resident."""
+
+        return self._model is not None
+
+    @property
+    def is_busy(self) -> bool:
+        """Best-effort health signal; admission still uses an atomic lock acquire."""
+
+        return self._run_lock.locked()
+
     def transcribe(self, path: str | os.PathLike[str]) -> str:
+        """Use the normal Praxis profile, waiting for the one inference worker."""
+
+        return self._transcribe(
+            path,
+            language=self.config.stt_language,
+            beam_size=self.config.stt_beam_size,
+            wait_for_worker=True,
+            require_loaded=False,
+        )
+
+    def transcribe_external(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        language: str | None,
+    ) -> str:
+        """Use the normal decode profile without loading or queueing."""
+
+        return self._transcribe(
+            path,
+            language=language,
+            beam_size=self.config.stt_beam_size,
+            wait_for_worker=False,
+            require_loaded=True,
+        )
+
+    def _transcribe(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        language: str | None,
+        beam_size: int,
+        wait_for_worker: bool,
+        require_loaded: bool,
+    ) -> str:
         source = Path(path).expanduser()
         if not source.is_file():
             raise AudioConfigurationError(f"audio input does not exist: {source}")
@@ -245,28 +300,48 @@ class FasterWhisperSTT:
             raise AudioConfigurationError(
                 f"audio input is too large ({size} > {self.config.stt_max_bytes} bytes)"
             )
+        if beam_size < 1:
+            raise AudioConfigurationError("beam_size must be >= 1")
 
+        acquired = False
+        model: Any | None = None
         try:
-            model = self._get_model()
-            with self._run_lock:
-                segments, _info = model.transcribe(
-                    str(source),
-                    language=self.config.stt_language,
-                    beam_size=self.config.stt_beam_size,
-                    vad_filter=self.config.stt_vad_filter,
-                    condition_on_previous_text=False,
-                )
-                parts = [
-                    str(segment.text).strip()
-                    for segment in segments
-                    if getattr(segment, "text", "").strip()
-                ]
+            if require_loaded:
+                if self._model is None:
+                    raise AudioNotReadyError("Whisper warmup has not completed")
+            else:
+                # Keep the existing load-before-run lock ordering.  ``clear_cache``
+                # takes the load lock first, so reversing it here could deadlock.
+                model = self._get_model()
+
+            acquired = self._run_lock.acquire(blocking=wait_for_worker)
+            if not acquired:
+                raise AudioBusyError("Whisper inference worker is busy")
+            if require_loaded:
+                model = self._model
+                if model is None:
+                    raise AudioNotReadyError("Whisper warmup has not completed")
+
+            segments, _info = model.transcribe(
+                str(source),
+                language=language,
+                beam_size=beam_size,
+                vad_filter=self.config.stt_vad_filter,
+                condition_on_previous_text=False,
+            )
+            parts = [
+                str(segment.text).strip()
+                for segment in segments
+                if getattr(segment, "text", "").strip()
+            ]
         except AudioBackendError:
             raise
         except Exception as exc:
-            raise AudioProcessingError(f"failed to transcribe {source.name}") from exc
+            raise AudioProcessingError("failed to transcribe audio input") from exc
         finally:
-            if not self.config.stt_keep_loaded:
+            if acquired:
+                self._run_lock.release()
+            if model is not None and not self.config.stt_keep_loaded:
                 self.clear_cache()
         return " ".join(parts)
 
@@ -567,9 +642,11 @@ def warm(*, stt: bool = True, tts: bool = True) -> dict[str, str]:
 
 __all__ = [
     "AudioBackendError",
+    "AudioBusyError",
     "AudioConfig",
     "AudioConfigurationError",
     "AudioDependencyError",
+    "AudioNotReadyError",
     "AudioProcessingError",
     "EdgeTTS",
     "FallbackTTS",

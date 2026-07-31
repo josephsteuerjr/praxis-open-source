@@ -437,12 +437,24 @@ def tools_to_openai(tools: list | None) -> list | None:
 
 
 def tools_to_anthropic(tools: list | None) -> list | None:
-    """Оставить Anthropic/function tools, отфильтровав relay-only hosted search."""
+    """Оставить Anthropic/function tools, отфильтровав relay-only hosted search.
+
+    Последний tool в массиве получает cache_control: ephemeral, чтобы весь блок
+    инструментных схем попал во второй cache breakpoint (первый — system-промпт).
+    Это ~20-25k токенов, которые иначе платятся каждый ход заново.
+    PRAXIS_PROMPT_CACHE=0 отключает (совместимо с _system в agent.py).
+    """
     if not tools:
         return None
     out = [t for t in tools
            if isinstance(t, dict) and t.get("type") != "web_search"]
-    return out or None
+    if not out:
+        return None
+    if os.getenv("PRAXIS_PROMPT_CACHE", "1").lower() not in ("0", "false", "no"):
+        last = dict(out[-1])
+        last["cache_control"] = {"type": "ephemeral"}
+        out[-1] = last
+    return out
 
 
 _VISION_MIME = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -644,11 +656,19 @@ def _usage_add(role: str, usage: dict, fallback: bool = False, model: str = "") 
         d["out"] = int(d.get("out", 0)) + u_out
         d["calls"] = int(d.get("calls", 0)) + 1
         d["fallback"] = int(d.get("fallback", 0)) + (1 if fallback else 0)
+        u_cr = int((usage or {}).get("cache_read", 0) or 0)
+        u_cc = int((usage or {}).get("cache_creation", 0) or 0)
+        if u_cr or u_cc:
+            d["cache_read"] = int(d.get("cache_read", 0)) + u_cr
+            d["cache_creation"] = int(d.get("cache_creation", 0)) + u_cc
         if model:
             m = d.setdefault("models", {}).setdefault(str(model), {"in": 0, "out": 0, "calls": 0})
             m["in"] += u_in
             m["out"] += u_out
             m["calls"] += 1
+            if u_cr or u_cc:
+                m["cache_read"] = m.get("cache_read", 0) + u_cr
+                m["cache_creation"] = m.get("cache_creation", 0) + u_cc
         USAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = USAGE_PATH.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -679,8 +699,11 @@ def usage_line() -> str:
         if not isinstance(d, dict) or not d.get("calls"):
             continue
         fb = f", фолбэков {d['fallback']}" if d.get("fallback") else ""
+        cr = int(d.get("cache_read", 0))
+        cc = int(d.get("cache_creation", 0))
+        cache = f", cache {f'{cr/1000:.1f}к' if cr >= 1000 else cr}r/{f'{cc/1000:.1f}к' if cc >= 1000 else cc}c" if (cr or cc) else ""
         parts.append(f"{_ROLE_RU[role]} {_k(int(d.get('in', 0)))}→{_k(int(d.get('out', 0)))} ток "
-                     f"({d['calls']} выз.{fb})")
+                     f"({d['calls']} выз.{fb}{cache})")
     return ", ".join(parts)
 
 
@@ -719,11 +742,19 @@ def _call_anthropic(cli, model: str, *, system, messages, tools, max_tokens, thi
     else:
         resp = cli.messages.create(**kw)
     usage = getattr(resp, "usage", None)
+    _usage = {"in": int(getattr(usage, "input_tokens", 0) or 0),
+              "out": int(getattr(usage, "output_tokens", 0) or 0)}
+    # Anthropic cache metrics — видимость hit-rate и реальной экономии
+    _cr = getattr(usage, "cache_read_input_tokens", None)
+    _cc = getattr(usage, "cache_creation_input_tokens", None)
+    if _cr:
+        _usage["cache_read"] = int(_cr)
+    if _cc:
+        _usage["cache_creation"] = int(_cc)
     return LLMResponse(
         text=text_of(resp), blocks=_blocks_from_anthropic(resp),
         stop_reason=str(getattr(resp, "stop_reason", None) or "end_turn"),
-        usage={"in": int(getattr(usage, "input_tokens", 0) or 0),
-               "out": int(getattr(usage, "output_tokens", 0) or 0)},
+        usage=_usage,
         framework="anthropic", model=model)
 
 

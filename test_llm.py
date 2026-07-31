@@ -197,7 +197,34 @@ class TestTranslation(Base):
         fn = {"name": "recall", "input_schema": {"type": "object"}}
         zai = {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
         native = {"type": "web_search", "external_web_access": True}
-        self.assertEqual(llm.tools_to_anthropic([fn, zai, native]), [fn, zai])
+        result = llm.tools_to_anthropic([fn, zai, native])
+        # relay-only web_search отфильтрован; остались fn и zai
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0], fn)
+        # последний tool получает cache_control (если PRAXIS_PROMPT_CACHE != 0)
+        import os as _os
+        if _os.getenv("PRAXIS_PROMPT_CACHE", "1").lower() not in ("0", "false", "no"):
+            self.assertEqual(result[-1].get("cache_control"), {"type": "ephemeral"})
+            # и при этом исходные ключи сохранены
+            self.assertEqual(result[-1].get("name"), "web_search")
+        else:
+            self.assertEqual(result, [fn, zai])
+
+    def test_tools_to_anthropic_cache_disabled(self):
+        """PRAXIS_PROMPT_CACHE=0 — tools уходят без cache_control."""
+        import os as _os
+        fn = {"name": "recall", "input_schema": {"type": "object"}}
+        old_val = _os.environ.get("PRAXIS_PROMPT_CACHE")
+        _os.environ["PRAXIS_PROMPT_CACHE"] = "0"
+        try:
+            result = llm.tools_to_anthropic([fn])
+            self.assertEqual(result, [fn])
+            self.assertNotIn("cache_control", result[0])
+        finally:
+            if old_val is None:
+                _os.environ.pop("PRAXIS_PROMPT_CACHE", None)
+            else:
+                _os.environ["PRAXIS_PROMPT_CACHE"] = old_val
 
     def test_native_search_options_are_strict(self):
         with self.assertRaises(ValueError):

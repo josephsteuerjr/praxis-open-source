@@ -16,16 +16,7 @@ commit прошёл gate и как откатываться, фиксирует 
 - [`STATUS.md`](STATUS.md) — единственная оперативная правда о live/candidate, проверках и rollback;
 - [`VISION.md`](VISION.md) — направление продукта, без журнала релизов;
 - [`AGENTS.md`](AGENTS.md) — опасные операции и правила работы с этим репозиторием;
-- [`body/README.md`](body/README.md) — сборка, установка и диагностика Windows Body;
-- [`relay/README.md`](relay/README.md) — импортированный Relay и его отдельная MIT-лицензия.
-
-## Лицензии
-
-Praxis вне каталога `relay/` распространяется по GNU AGPLv3; краткое уведомление находится в
-[`LICENSE`](LICENSE), полный текст — в [`LICENSE-AGPL-3.0.txt`](LICENSE-AGPL-3.0.txt).
-Импортированный компонент [`relay/`](relay/) распространяется отдельно по MIT License; его условия
-и provenance снимка находятся в [`relay/LICENSE`](relay/LICENSE) и [`relay/README.md`](relay/README.md).
-Сводный лицензионный шов зафиксирован в [`NOTICE`](NOTICE).
+- [`body/README.md`](body/README.md) — сборка, установка и диагностика Windows Body.
 
 ## Главные границы
 
@@ -91,6 +82,38 @@ docker compose logs -f praxis
 остальные настройки. Production compose, дополнительные процессы и host mounts находятся в
 `docker-compose.deploy.yml`. `praxis-serverd` и `praxis-body-bridge` устанавливаются как отдельные
 systemd units, а не как второй агент внутри Compose.
+
+### Конфигурация Codex relay
+
+Codex здесь не отдельный «авторизационный файл Praxis», а OpenAI-compatible relay для
+`frameworks.openai` в приватном runtime-конфиге `memory/llm.json`. Нормальный путь обновления
+`base_url` и ключа — owner-панель: она показывает ключ только маской, требует подтверждение при
+применении и затем делает атомарную запись с правами `0600`. Пустое поле ключа означает
+«оставить текущий», а не стереть его; проверка роли после правки доступна тем же пультом. Все
+процессы подхватывают изменение по mtime, поэтому для обычной смены relay/token рестарт не нужен.
+
+На самом первом старте, пока `memory/llm.json` отсутствует, код один раз переносит
+`OPENAI_BASE_URL` и `OPENAI_API_KEY` из окружения в этот файл. Это bootstrap-миграция, не
+постоянный источник конфигурации. В production-контуре контейнеры ходят к локальному relay через
+host Caddy; ожидаемый URL — `http://host.docker.internal:5012`. Compose описывает только этот
+маршрут: он не создаёт relay/Caddy и в данном репозитории нет скрипта логина/refresh для внешней
+Codex-авторизации. Их следует документировать рядом с тем host-сервисом, который реально владеет
+учётной записью и refresh-token, а не выдумывать в репозитории Praxis.
+
+### Markdown и SQL при первом развёртывании
+
+Человекочитаемый Markdown и append-only JSONL — канонические данные Praxis: корневые living docs
+описывают систему, `soul/` хранит конституцию/голос/навыки, а `memory/` — наблюдения, отношения,
+run-evidence и навигацию. `memory/INDEX.md`, `memory/maps/*.md` и отдельные `CURRENT.md` —
+генерируемые представления, а не второй источник истины; роли каталогизированы в
+`ARCHITECTURE.md`, `CODEMAP.md` и `memory/README.md`.
+
+Отдельной SQL-схемы, миграции или create-DB скрипта для развёртывания нет — и это намеренно.
+SQLite используется как локальный, пересобираемый ускоритель (`memory/.state/recall.sqlite3` для
+FTS и индекс наблюдений Windows): таблицы создаются приложением при первом доступе, а FTS умеет
+собрать временную БД, проверить её и атомарно заменить рабочую. Docker Compose и Dockerfile не
+создают внешнюю БД. Не удаляйте всю `memory/.state/` как «кэш»: рядом с производными SQLite там
+живут outbox и durable ledgers, которые должны попадать в backup.
 
 `mailroom_bot.py` читает секрет `PRAXIS_MAIL_BOT_TOKEN` из private `.deploy.env`. Публичный
 `PRAXIS_APP_URL` и стандартный PWA file-transfer cap настраиваются в `.env`; по умолчанию браузерный

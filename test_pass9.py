@@ -328,6 +328,27 @@ class TestUsageMeter(BufBase):
     def test_usage_line_empty_when_silent(self):
         self.assertEqual(llm.usage_line(), "")
 
+    def test_usage_persists_cache_metrics(self):
+        """cache_read/cache_creation накапливаются в daily usage и видны в usage_line."""
+        llm._usage_add("voice", {"in": 1000, "out": 100, "cache_read": 800, "cache_creation": 200},
+                        model="glm-5.2")
+        data = llm._usage_load()
+        day = data.get(self._today(), {})
+        v = day.get("voice", {})
+        self.assertEqual(v.get("cache_read"), 800)
+        self.assertEqual(v.get("cache_creation"), 200)
+        # model breakdown тоже хранит
+        self.assertEqual(v.get("models", {}).get("glm-5.2", {}).get("cache_read"), 800)
+        # usage_line показывает cache
+        line = llm.usage_line()
+        self.assertIn("cache", line)
+
+    def test_usage_no_cache_metrics_when_absent(self):
+        """Без cache-метрик usage_line не показывает cache."""
+        llm._usage_add("evaluator", {"in": 500, "out": 50})
+        line = llm.usage_line()
+        self.assertNotIn("cache", line)
+
     def test_usage_days_window(self):
         old = (_dt.date.today() - _dt.timedelta(days=10)).isoformat()
         llm.USAGE_PATH.parent.mkdir(parents=True, exist_ok=True)

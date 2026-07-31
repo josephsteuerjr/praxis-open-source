@@ -145,6 +145,54 @@ class SocialPulseTests(unittest.TestCase):
         self.assertEqual(current_run["status"], "deferred")
         self.assertTrue(social_pulse.due(now=3701, path=self.path))
 
+    def test_repeated_defers_keep_the_pulse_due(self):
+        """Серия отказов подряд не должна съедать окно.
+
+        `defer` возвращал claim на «предыдущий прогон» без фильтра по статусу, поэтому
+        ВТОРОЙ отказ подряд откатывал часы на прогон, который сам никогда не открывался
+        (он тоже был deferred) — и пульс уезжал на целый период, ни разу не отработав.
+        Первый отказ при этом выглядел исправным, поэтому шов держался: ломается только
+        длинный живой ход, который занимает несколько попыток подряд."""
+        prior = social_pulse.begin(now=100, path=self.path)
+        social_pulse.finish(prior, ok=True, now=120, path=self.path)
+
+        first = social_pulse.begin(now=3700, path=self.path)
+        social_pulse.defer(first, detail="live turn", now=3701, path=self.path)
+        self.assertTrue(social_pulse.due(now=3702, path=self.path))
+
+        second = social_pulse.begin(now=3820, path=self.path)
+        self.assertTrue(second, "после отказа пульс обязан снова браться")
+        social_pulse.defer(second, detail="live turn again", now=3821, path=self.path)
+        self.assertTrue(social_pulse.due(now=3822, path=self.path),
+                        "второй отказ подряд съел окно на целый период")
+
+        third = social_pulse.begin(now=3940, path=self.path)
+        self.assertTrue(third, "третья попытка тоже обязана состояться")
+        social_pulse.finish(third, ok=True, now=3950, path=self.path)
+        # А вот ПОСЛЕ реально открывшегося окна часы снова идут по периоду.
+        self.assertFalse(social_pulse.due(now=4000, path=self.path))
+        self.assertTrue(social_pulse.due(now=3940 + 3600, path=self.path))
+
+    def test_deferrals_do_not_inflate_her_own_wake_count(self):
+        """`started_today` — это её ответ себе на «сколько раз я сегодня просыпалась».
+
+        Отложенное окно не открывалось; считать его пробуждением значит завысить ей её
+        же активность. Отсрочки при этом обязаны быть видны — отдельным числом."""
+        first = social_pulse.begin(now=100, path=self.path)
+        social_pulse.finish(first, ok=True, now=120, path=self.path)
+        deferred = social_pulse.begin(now=3700, path=self.path)
+        social_pulse.defer(deferred, detail="live turn", now=3701, path=self.path)
+
+        current = social_pulse.begin(now=3820, path=self.path)
+        payload = json.loads(
+            social_pulse.observability(current, now=3830, path=self.path).split(": ", 1)[1]
+        )
+        self.assertEqual(payload["started_today"], 2, "отложенное окно посчитано пробуждением")
+        self.assertEqual(payload["deferred_today"], 1, "отсрочка не видна ей вовсе")
+        # «Сколько прошло с прошлого раза» тоже меряется от реального пробуждения.
+        self.assertAlmostEqual(payload["hours_since_previous_started"], (3830 - 100) / 3600, places=2)
+        self.assertEqual(payload["previous_status"], "done")
+
     def test_mailbox_items_are_seen_only_after_successful_pulse(self):
         pulse = social_pulse.begin(now=100, path=self.path)
         social_pulse.finish(pulse, ok=False, mailbox_hashes=["abcd"], now=101, path=self.path)
