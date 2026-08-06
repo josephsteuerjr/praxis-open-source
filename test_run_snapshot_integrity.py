@@ -1285,8 +1285,8 @@ class FrameDidNotMove(unittest.TestCase):
     def test_the_judge_address_she_is_told_is_measured_not_remembered(self):
         """Адрес судьи считается живьём и печатается ей в `my_capabilities`."""
         self.assertEqual(rails.outbound_judge_sites(),
-                         [("agent.py", 12726, "_guard_outbound")])
-        self.assertIn("agent.py:12726", capabilities.describe("owner"))
+                         [("agent.py", 12838, "_guard_outbound")])
+        self.assertIn("agent.py:12838", capabilities.describe("owner"))
 
     def test_the_frozen_frame_constants_are_byte_identical(self):
         """Вморожены только те куски кадра, которые НЕ ЗАВИСЯТ ОТ ЖИВОГО СОСТОЯНИЯ.
@@ -1350,7 +1350,9 @@ class FrameDidNotMove(unittest.TestCase):
         self.assertTrue(touched[1].startswith("return run_snapshot.write("))
         self.assertTrue(touched[2].startswith("parsed, scan = run_snapshot.authority_scan("))
         self.assertTrue(touched[3].startswith("read_section = run_snapshot.reader("))
-        self.assertEqual(len(source), 14120,
+        # 14120 (прод) -> 14221: зона «сейчас», подписанный тег реплики,
+        # прибор над всей лентой. Каждый шаг заказан и назван в чеклисте.
+        self.assertEqual(len(source), 14232,
                          "agent.py сдвинулся в строках — сверь, что это заказано")
 
     def test_the_new_module_declares_no_rail_and_no_environment_switch(self):

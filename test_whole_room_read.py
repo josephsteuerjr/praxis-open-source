@@ -136,11 +136,21 @@ class TestTheHandDoesWhatThePromptPromises(Base):
         finally:
             agent._TURN_CHANNEL.reset(token)
 
-    def test_without_evidence_the_hand_stays_in_the_branch(self):
+    def test_without_evidence_the_hand_returns_the_whole_room(self):
+        """Недоказанное — не форум. Решение Егора 06.08, принято Праксис.
+
+        ⚠ Тест назывался `..._stays_in_the_branch` и держал ОБРАТНУЮ политику: пока про
+        комнату ничего не доказано, её рука отдавала ветку. Но форум — это то, о чём
+        Telegram отвечает ПРЯМО; молчание реестра значит «мы не спрашивали». Замер 06.08:
+        446 буферов, из них 424 ветки, при двух настоящих форумах на все её места.
+
+        Сузиться до одной ветки она по-прежнему может сама — это `topic_id` и это её
+        право, а не наша забывчивость (соседний тест).
+        """
         peer = self._room()
         out = self._tool(peer, 100, action="context", limit=200)
-        self.assertIn("зачин 100", out)
-        self.assertNotIn("зачин 200", out, "без свидетельства поведение прежнее")
+        for marker in ("зачин 100", "зачин 200", "зачин 300"):
+            self.assertIn(marker, out, marker)
 
     def test_proven_room_hand_returns_the_room(self):
         peer = self._room()
@@ -165,9 +175,20 @@ class TestTheHandDoesWhatThePromptPromises(Base):
         self.assertNotIn("зачин 200", out, "в форуме тема — отдельное место")
 
     def test_the_map_calls_threads_by_their_real_name(self):
+        """Имя ветки следует за тем же решением, что и чтение. Один читатель — одно слово.
+
+        ⚠ Прежде карта до свидетельства говорила `topic #`, то есть утверждала границу,
+        проведённую Telegram, не имея на то ответа Telegram. Это была та же неверная
+        осторожность, что и в чтении, только в словах: `topic` — сильное утверждение, а не
+        нейтральное. Класс этого файла ниже говорит прямо: читателей решения трое, и
+        разойтись они могут только молча. Значит карта обязана назвать ветки цепочками
+        ответов там же, где чтение отдаёт комнату.
+        """
         peer = self._room()
         plain = self._tool(peer, 100, action="topics")
-        self.assertIn("topic #", plain)
+        self.assertIn("reply thread #", plain,
+                      "карта зовёт ветку темой, пока чтение уже отдаёт комнату")
+        self.assertNotIn("topic #", plain)
         tr.observe(peer, kind="channel_forum_missing", message_id=1)
         proven = self._tool(peer, 100, action="topics")
         self.assertIn("reply thread #", proven)

@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use tokio::sync::mpsc;
 use url::Url;
 
+use crate::core::account_router::AccountRouter;
 use crate::core::config::Config;
 use crate::core::models::{
     ChatRequest, ImageUrlContent, Message, MessageContent, MessageContentPart, ResponseChoice,
@@ -304,6 +305,7 @@ fn build_codex_request(
 
 pub async fn stream_chat_completions(
     config: &Config,
+    account_router: AccountRouter,
     request: ChatRequest,
     client: Client,
 ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
@@ -375,36 +377,22 @@ pub async fn stream_chat_completions(
         // image URLs or megabytes of base64-encoded image data.
         println!("🔍 DEBUG - Request payload prepared (content redacted)");
 
-        // Get access token and account ID
-        println!("🔑 Getting access token...");
-        let access_token = match get_access_token(&config).await {
-            Ok(token) => {
-                println!("Access token retrieved");
-                token
-            }
-            Err(e) => {
-                println!("❌ Access token retrieval failed: {}", e);
+        // Token and account id come from one immutable account snapshot.  The
+        // old pair of independent auth reads could mix identities during a
+        // refresh or account change.
+        let mut account = match account_router.lease_active().await {
+            Ok(account) => account,
+            Err(error) => {
                 let _ = tx
-                    .send(Err(anyhow::anyhow!("Access token retrieval failed: {}", e)))
+                    .send(Err(anyhow::anyhow!(
+                        "Active subscription authentication failed: {}",
+                        error
+                    )))
                     .await;
                 return;
             }
         };
-
-        println!("🆔 Getting account ID...");
-        let account_id = match get_account_id(&config).await {
-            Ok(id) => {
-                println!("✅ Account ID retrieved (redacted)");
-                id
-            }
-            Err(e) => {
-                println!("❌ Account ID retrieval failed: {}", e);
-                let _ = tx
-                    .send(Err(anyhow::anyhow!("Account ID retrieval failed: {}", e)))
-                    .await;
-                return;
-            }
-        };
+        println!("Active subscription slot: {}", account.slot);
 
         // Try the exact URL that working codex uses: base + codex + responses
         println!(
@@ -419,11 +407,12 @@ pub async fn stream_chat_completions(
         println!("🔍 DEBUG - Auth and session headers prepared (redacted)");
 
         let mut retried = false;
+        let mut account_failover_done = false;
         let response = loop {
             match build_codex_request(
                 &client,
-                &access_token,
-                &account_id,
+                &account.access_token,
+                &account.account_id,
                 &session_id,
                 &payload,
             )
@@ -446,6 +435,30 @@ pub async fn stream_chat_completions(
                         .unwrap_or_else(|_| "Failed to read response body".to_string());
                     println!("❌ Failed with status: {}", status);
                     println!("🔍 DEBUG - Upstream error body redacted from logs");
+
+                    // A subscription exhaustion response arrives before a
+                    // successful SSE stream begins, so replaying the same
+                    // request on the standby cannot duplicate text or tools.
+                    // Generic 429s are intentionally excluded: only the
+                    // explicit quota code may move the whole relay.
+                    if subscription_quota_error(status, &response_body)
+                        && !account_failover_done
+                    {
+                        match account_router.switch_after_quota(&account).await {
+                            Ok(standby) => {
+                                println!(
+                                    "Subscription exhausted; retrying on active slot {}",
+                                    standby.slot
+                                );
+                                account = standby;
+                                account_failover_done = true;
+                                continue;
+                            }
+                            Err(error) => {
+                                println!("Subscription failover unavailable: {}", error);
+                            }
+                        }
+                    }
 
                     // Optional knobs (reasoning, prompt_cache_key, minimal instructions)
                     // may be rejected by an upstream quirk; retry once in the maximally
@@ -471,10 +484,9 @@ pub async fn stream_chat_completions(
 
                     // Send properly formatted error response as SSE
                     // Transform specific error messages for better user experience
-                    let user_friendly_message = if status.as_u16() == 429
-                        && response_body.contains("usage_limit_reached")
-                    {
-                        "You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/pricing), or wait for limits to reset (every 5h and every week.).".to_string()
+                    let user_friendly_message = if subscription_quota_error(status, &response_body) {
+                        "Both OpenAI subscriptions are currently unavailable because of usage limits."
+                            .to_string()
                     } else {
                         upstream_error_message(status, &response_body)
                     };
@@ -827,10 +839,25 @@ fn extract_completed_usage(event: &Value) -> Option<crate::core::models::Usage> 
         .get("total_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(u64::from(prompt + completion)) as u32;
+    // 02.08.2026: деталь кэша. Апстрим (Responses API) кладёт её в
+    // `usage.input_tokens_details.cached_tokens`; OpenAI-совместимая форма, которую ждёт
+    // клиент, называет то же поле `prompt_tokens_details.cached_tokens`. Читаем оба имени:
+    // одно — то, что приходит сегодня, второе — то, что придёт, если апстрим перейдёт на
+    // chat-совместимую форму. Отсутствие поля остаётся ОТСУТСТВИЕМ (None), а не нулём:
+    // «кэш не сработал» и «провайдер не сказал» — разные факты, и путать их дороже.
+    let cached = usage
+        .get("input_tokens_details")
+        .or_else(|| usage.get("prompt_tokens_details"))
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .map(|value| crate::core::models::PromptTokensDetails {
+            cached_tokens: value as u32,
+        });
     Some(crate::core::models::Usage {
         prompt_tokens: prompt,
         completion_tokens: completion,
         total_tokens: total,
+        prompt_tokens_details: cached,
     })
 }
 
@@ -1055,6 +1082,20 @@ fn upstream_error_message(status: reqwest::StatusCode, body: &str) -> String {
     }
 }
 
+fn subscription_quota_error(status: reqwest::StatusCode, body: &str) -> bool {
+    if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return false;
+    }
+    let parsed = serde_json::from_str::<Value>(body).ok();
+    let error = parsed
+        .as_ref()
+        .and_then(|value| value.get("error").or(Some(value)));
+    let code = error
+        .and_then(|value| value.get("code").or_else(|| value.get("type")))
+        .and_then(Value::as_str);
+    code == Some("usage_limit_reached") || body.contains("usage_limit_reached")
+}
+
 fn bounded_error_text(raw: &str) -> Option<String> {
     let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.is_empty() {
@@ -1069,32 +1110,26 @@ fn bounded_error_text(raw: &str) -> Option<String> {
     Some(bounded)
 }
 
-async fn get_access_token(config: &Config) -> Result<String> {
-    use crate::login::lib::CodexAuth;
-
-    let auth = CodexAuth::from_codex_home(&config.codex_home)?
-        .ok_or_else(|| anyhow::anyhow!("No authentication found"))?;
-
-    let token_data = auth.get_token_data().await?;
-    Ok(token_data.access_token)
-}
-
-async fn get_account_id(config: &Config) -> Result<String> {
-    use crate::login::lib::CodexAuth;
-
-    let auth = CodexAuth::from_codex_home(&config.codex_home)?
-        .ok_or_else(|| anyhow::anyhow!("No authentication found"))?;
-
-    let token_data = auth.get_token_data().await?;
-    token_data
-        .account_id
-        .ok_or_else(|| anyhow::anyhow!("No account ID found"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn only_explicit_subscription_exhaustion_triggers_failover() {
+        assert!(subscription_quota_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":{"code":"usage_limit_reached"}}"#,
+        ));
+        assert!(!subscription_quota_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":{"code":"rate_limit_exceeded"}}"#,
+        ));
+        assert!(!subscription_quota_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"error":{"code":"usage_limit_reached"}}"#,
+        ));
+    }
 
     #[test]
     fn carries_cyrillic_split_across_chunk_boundary() {
@@ -1394,6 +1429,47 @@ mod tests {
         assert!(extract_completed_usage(&json!({"type": "response.output_text.delta"})).is_none());
         assert!(extract_completed_usage(
             &json!({"type": "response.completed", "response": {"usage": {}}})).is_none());
+        // Без детали кэша поле остаётся ОТСУТСТВУЮЩИМ, а не нулевым.
+        assert!(usage.prompt_tokens_details.is_none());
+    }
+
+    #[test]
+    fn cached_prefix_accounting_survives_the_relay() {
+        // 02.08.2026: реле схлопывало usage до трёх чисел, и деталь кэша терялась —
+        // у Praxis в учёте стояли нули по всем ходам через gpt, что читалось как
+        // «кэш не работает», хотя означало «не сообщено».
+        let upstream = json!({
+            "type": "response.completed",
+            "response": {"usage": {
+                "input_tokens": 42000, "output_tokens": 300, "total_tokens": 42300,
+                "input_tokens_details": {"cached_tokens": 18800}
+            }}
+        });
+        let usage = extract_completed_usage(&upstream).expect("usage forwarded");
+        assert_eq!(
+            usage.prompt_tokens_details.as_ref().map(|d| d.cached_tokens),
+            Some(18800)
+        );
+        // Chat-совместимое имя того же поля читается тоже.
+        let chat_shaped = json!({
+            "type": "response.completed",
+            "response": {"usage": {
+                "input_tokens": 10, "output_tokens": 1, "total_tokens": 11,
+                "prompt_tokens_details": {"cached_tokens": 7}
+            }}
+        });
+        assert_eq!(
+            extract_completed_usage(&chat_shaped)
+                .and_then(|u| u.prompt_tokens_details)
+                .map(|d| d.cached_tokens),
+            Some(7)
+        );
+        // И доезжает до клиента в SSE-чанке, а не только внутри реле.
+        let chunk = parse_sse_event(&upstream, 0).expect("completed event parsed");
+        assert_eq!(
+            chunk.usage.and_then(|u| u.prompt_tokens_details).map(|d| d.cached_tokens),
+            Some(18800)
+        );
     }
 
     #[test]

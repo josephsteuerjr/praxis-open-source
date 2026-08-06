@@ -18,6 +18,7 @@ mod core;
 mod login;
 
 use core::chat_completions;
+use core::account_router::AccountRouter;
 use core::config::Config;
 use core::limits::LimitsCache;
 use core::models::{
@@ -38,6 +39,7 @@ static SERVER_HANDLES: Lazy<Mutex<Vec<JoinHandle<()>>>> = Lazy::new(|| Mutex::ne
 #[derive(Clone)]
 struct AppState {
     config: Arc<Config>,
+    accounts: AccountRouter,
     limits: LimitsCache,
     // One pooled client for every upstream call: Client::new() per request cost a
     // fresh DNS+TCP+TLS handshake to chatgpt.com on every single LLM call.
@@ -222,15 +224,8 @@ async fn run_server() -> anyhow::Result<()> {
         }
     };
 
-    // Check authentication
-    match check_authentication(&config).await {
-        Ok(_) => info!("Authentication check passed"),
-        Err(e) => {
-            error!("Authentication check failed: {}", e);
-            error!("Please use the 'Login' option in the CLI menu. This will enable Opencode and other integrations.");
-            return Err(e);
-        }
-    }
+    // Load the active subscription and any standby before accepting traffic.
+    let accounts = AccountRouter::load(&config.codex_home).await?;
 
     // Create app state
     let client = reqwest::Client::builder()
@@ -243,6 +238,7 @@ async fn run_server() -> anyhow::Result<()> {
         });
     let app_state = AppState {
         config,
+        accounts,
         limits: LimitsCache::default(),
         client,
     };
@@ -524,13 +520,17 @@ async fn check_authentication(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn health_handler() -> Json<serde_json::Value> {
+async fn health_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     info!("💓 Health check endpoint requested");
     let response = serde_json::json!({
         "status": "healthy",
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "service": "relay",
-        "version": env!("CARGO_PKG_VERSION")
+        "version": env!("CARGO_PKG_VERSION"),
+        "account_router": {
+            "active_slot": state.accounts.active_slot().await,
+            "configured_slots": state.accounts.account_count(),
+        }
     });
     info!("✅ Health check response: {}", response);
     Json(response)
@@ -546,7 +546,7 @@ async fn models_handler(State(_state): State<AppState>) -> Json<ModelList> {
 }
 
 async fn limits_handler(State(state): State<AppState>) -> Response {
-    match state.limits.get(&state.config).await {
+    match state.limits.get(&state.accounts).await {
         Ok(value) => {
             let mut response = Json(value.clone()).into_response();
             core::limits::apply_response_headers(response.headers_mut(), &value);
@@ -644,8 +644,13 @@ async fn chat_completions_handler(
     }
 
     // Process the chat completion
-    match chat_completions::stream_chat_completions(&state.config, request, state.client.clone())
-        .await
+    match chat_completions::stream_chat_completions(
+        &state.config,
+        state.accounts.clone(),
+        request,
+        state.client.clone(),
+    )
+    .await
     {
         Ok(response_stream) => {
             info!("✅ Chat completion stream started successfully");

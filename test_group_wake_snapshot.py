@@ -8,6 +8,7 @@ import asyncio
 import datetime
 import sys
 import time
+import os
 import types
 import unittest
 from collections import defaultdict, deque
@@ -722,6 +723,77 @@ class TestAddressFrame(unittest.TestCase):
         self.assertIn("mention", frame)
         self.assertIn("180 seconds ago", frame)
         self.assertIn("stop at that address", frame)
+
+
+class _ChannelEvent(_Event):
+    """Событие с ПРИРОДОЙ места: `broadcast` приходит бесплатно в объекте апдейта."""
+
+    def __init__(self, *, broadcast, **kw):
+        super().__init__(**kw)
+        self.chat = types.SimpleNamespace(broadcast=broadcast, forum=None, min=False,
+                                          title="AbstractDL")
+
+
+class TestBroadcastChannelIsClosed(unittest.IsolatedAsyncioTestCase):
+    """Решение Егора 06.08: её место — ЧАТ канала, а не канал.
+
+    Запись канала и так приезжает в связанное обсуждение авторством канала — так её
+    видит человек. Отдельное место для той же записи давало ей второй экземпляр одного
+    события и комнату, в которой у неё нет голоса. Живьём это стоило хода: 03.08 в 14:08
+    она ответила в вещательный канал и узнала об этом из отказа доставки.
+
+    Тест держит ОБЕ стороны калитки: канал не входит, обычная группа входит как раньше.
+    Односторонняя проверка тут бесполезна — «ничего не пришло» верно и у сломанного входа.
+    """
+
+    async def _deliver(self, *, broadcast):
+        buf = defaultdict(lambda: deque(maxlen=runner.BUF_MAXLEN))
+        wakes = {}
+        arm = Mock()
+        with (
+            patch.object(runner, "OWNER_ID", 101),
+            patch.object(runner, "_buf", buf),
+            patch.object(runner, "_buf_dirty", set()),
+            patch.object(runner, "_meta", {}),
+            patch.object(runner, "_group_wakes", wakes),
+            patch.object(runner, "_pending_media", defaultdict(lambda: deque(maxlen=16))),
+            patch.object(runner, "_recent_msgs", defaultdict(lambda: deque(maxlen=12))),
+            patch.object(runner, "_recent_senders", defaultdict(lambda: deque(maxlen=40))),
+            patch.object(runner, "_seen_ids", defaultdict(lambda: deque(maxlen=100))),
+            patch.object(runner, "_capture_typed_media", AsyncMock(return_value=(None, None))),
+            patch.object(runner, "_chat_descriptor",
+                         AsyncMock(return_value={"title": "AbstractDL", "size": 98000})),
+            patch.object(runner, "_arm", arm),
+            patch.object(runner.bufstore, "meta_update", return_value=None),
+            patch.object(runner.rooms, "is_frozen", return_value=False),
+            patch.object(runner.rooms, "is_allowed", return_value=True),
+            patch.object(runner.rooms, "effective_mode", return_value="normal"),
+            patch.object(runner.social, "category", return_value="known"),
+            patch.object(runner.reflex, "triage", return_value="reply"),
+        ):
+            await runner.on_new(_ChannelEvent(
+                broadcast=broadcast, mid=10, text="@praxis запись канала",
+                name="AbstractDL", sender_id=555, mentioned=True))
+        return buf, wakes, arm
+
+    async def test_a_broadcast_channel_never_becomes_her_place(self):
+        buf, wakes, arm = await self._deliver(broadcast=True)
+        self.assertEqual(sum(len(v) for v in buf.values()), 0,
+                         "запись канала легла ей в буфер как разговор")
+        self.assertEqual(wakes, {}, "канал разбудил её в комнате, где у неё нет голоса")
+        self.assertEqual(arm.call_count, 0, "ход в канале был заведён")
+
+    async def test_an_ordinary_group_still_comes_in(self):
+        buf, _wakes, arm = await self._deliver(broadcast=False)
+        self.assertGreater(sum(len(v) for v in buf.values()), 0,
+                           "калитка канала закрыла обычную группу — это уже глухота")
+
+    async def test_the_lever_opens_the_channel_back(self):
+        """Её условие приёмки: рычаг возврата остаётся, и он проверяется, а не обещан."""
+        with patch.dict(os.environ, {"PRAXIS_BROADCAST_INTAKE": "1"}):
+            buf, _wakes, _arm = await self._deliver(broadcast=True)
+        self.assertGreater(sum(len(v) for v in buf.values()), 0,
+                           "рычаг возврата не открывает канал — значит его нет")
 
 
 if __name__ == "__main__":

@@ -154,11 +154,11 @@ class LostSaysWhatWasAlreadyDone(unittest.TestCase):
     def test_recap_names_the_last_observable_work(self):
         self._abandoned("hcode-d8799ba2", self.tmp, events=[
             {"at": "x", "kind": "task_started"},
-            {"at": "x", "kind": "command", "summary": "host ok: Unbanning 198.51.100.7"},
+            {"at": "x", "kind": "command", "summary": "host ok: Unbanning 203.0.113.59"},
         ])
         self.assertEqual(forge.reconcile_lost_tasks(), 1)
         recap = self._recap()
-        self.assertIn("Unbanning 198.51.100.7", recap,
+        self.assertIn("Unbanning 203.0.113.59", recap,
                       "вернувшись к задаче, она должна видеть, что уже сделано")
         self.assertNotIn("task_started", recap, "служебные отметки петли — не работа")
 

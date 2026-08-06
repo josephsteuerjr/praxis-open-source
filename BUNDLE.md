@@ -101,6 +101,31 @@ docker compose -f docker-compose.bundle.yml --profile ollama up -d
 docker compose -f docker-compose.bundle.yml exec ollama ollama pull nomic-embed-text
 ```
 
+## Две среды, один compose
+
+Файл один намеренно: две копии правды расходятся за месяц. Разница между Docker Desktop
+и сервером — не в конфиге, а в трёх бытовых вещах.
+
+**Docker Desktop (Windows / macOS)**
+
+- каталог репозитория должен быть в шаренной с Docker папке (Settings → Resources →
+  File sharing). На Windows держи его на диске `C:` вне `Program Files` — иначе том
+  примонтируется пустым и она поднимется без памяти;
+- `host.docker.internal` уже существует штатно; строка `extra_hosts` в compose лишней не
+  будет — она нужна серверу;
+- останавливать через `docker compose stop`, а не закрытием Desktop: у неё durable-
+  возобновление прогонов, и `stop_grace_period: 30s` даёт дописать состояние.
+
+**Сервер (Linux)**
+
+- нужен `docker-compose-plugin`; `network_mode: host` не используется нигде, поэтому
+  ничего дополнительно открывать не надо;
+- `extra_hosts: host.docker.internal:host-gateway` — то, чем контейнер видит петлю хоста;
+- автозапуск даёт `restart: unless-stopped`; systemd-юнит для этого не нужен.
+
+**Общее и важное.** Состояние (память, душа, `*.session`) лежит в каталоге репозитория, а
+не в анонимном томе. Удалить контейнер безопасно; удалить каталог — потерять её.
+
 ## Что где лежит
 
 Состояние — в каталоге репозитория, а не в анонимном томе: `memory/` (память, дневник,

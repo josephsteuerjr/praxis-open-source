@@ -48,6 +48,7 @@ import capabilities
 import computer_memory
 import context_envelope
 import desires
+import frame_layout
 import frame_trace
 import graph
 import group_context
@@ -6674,16 +6675,29 @@ def _recall_block(query: str | None, scope: str = "owner") -> str:
         "memory/journal/", "memory/reflections.md", "memory/life/reflections/",
     )
     filtered = []
+    # ⚠ ПРИЧИНЫ ОТСЕВА СЧИТАЮТСЯ ПОИМЁННО. Общее «снято N» не отвечает на пятый вопрос:
+    # три фильтра здесь разной природы, и «сняли трёх» одинаково верно и когда сработала
+    # каноничность, и когда чёрный список дневника.
+    drops = {"recall_drop_canonical": 0, "recall_drop_journal": 0, "recall_drop_provenance": 0}
     for hit in hits:
         path = str(hit.get("path") or "").replace("\\", "/")
-        if (hit.get("automatic_canonical") is not True
-                or path.startswith(blocked)
-                or not memory_provenance.automatic_recall_allowed(
-                    source_type=hit.get("source_type"), path=path,
-                    text=hit.get("text"), memory_dir=MEM_DIR,
-                )):
+        if hit.get("automatic_canonical") is not True:
+            drops["recall_drop_canonical"] += 1
+            continue
+        if path.startswith(blocked):
+            drops["recall_drop_journal"] += 1
+            continue
+        if not memory_provenance.automatic_recall_allowed(
+                source_type=hit.get("source_type"), path=path,
+                text=hit.get("text"), memory_dir=MEM_DIR):
+            drops["recall_drop_provenance"] += 1
             continue
         filtered.append(hit)
+    # ⚠ Потолок кладётся ОТДЕЛЬНЫМ фактом: `len(hits)` — это сколько индекс ОТДАЛ, а не
+    # предел, который мы просили. Пока их печатали одним числом, кадр сообщал «5 из 5» там,
+    # где кандидатов было тридцать, — неверный ответ на пятый вопрос дороже отсутствующего.
+    frame_layout.stash(recall_query=query, recall_raw=len(hits), recall_kept=len(filtered),
+                       recall_cap=recall_k, **drops)
     hits = filtered[:recall_k]
     _trace_lessons_in_frame(hits, query)
     if not hits:
@@ -6695,7 +6709,7 @@ def _recall_block(query: str | None, scope: str = "owner") -> str:
         claim_label = memory_provenance.claim_prompt_label(hit.get("source_type"))
         has_claim = has_claim or bool(claim_label)
         trust = (claim_label + " · ") if claim_label else ""
-        rows.append(f"- [{trust}{_recall_origin(hit, path)}] {hit['text']}")
+        rows.append(frame_layout.origin(hit, path, trust, _recall_origin(hit, path)))
     out = "\n".join(rows)
     if has_claim:
         out = "[TRUST CONTRACT] " + memory_provenance.claim_prompt_warning() + "\n" + out
@@ -7262,6 +7276,11 @@ def _build_prompt_parts(
             room_profile = candidate if candidate.get("structured") else None
         except Exception:
             room_profile = None
+    # Снимок для зоны «СЕЙЧАС»: она читает ОТСЮДА и на диск не ходит. Профиль комнаты и так
+    # читается за кадр трижды без гарантии совпадения — четвёртая версия правды о комнате
+    # в кадре, который чинили ради правды, была бы прямым откатом.
+    frame_layout.begin(room_profile_id=room_profile_id, room_mode=(room_profile or {}).get("mode"),
+                       room_disclosure=(room_profile or {}).get("disclosure"))
     if room_profile is not None and room_profile.get("mode") in rooms.MODES:
         # Only the validated enum is a system fact. Attribution, free-form reason and
         # room prose remain visible below as Praxis-owned mutable evidence.
@@ -7292,13 +7311,23 @@ def _build_prompt_parts(
     # валидный JSON-объект, поэтому свойство «одна строка кадра = один объект» сохраняется;
     # ярлык не теряется — он печатается отдельной строкой-объектом перед телом.
     raw_jsonl_tiers: set[str] = set()
-    channel_rows = []
-    if speaker:
-        channel_rows.append(json.dumps({"active_speaker": str(speaker)[:500]}, ensure_ascii=False))
-    if ctx.title:
-        channel_rows.append(json.dumps({"room_title": str(ctx.title)[:500]}, ensure_ascii=False))
-    if channel_rows:
-        tiers.append(("Current Telegram labels", "\n".join(channel_rows)))
+    # ⚠ 05.08. Тир «Current Telegram labels» снят В НОВОЙ ФОРМЕ. Имя того, кому она отвечает,
+    # было утоплено здесь — на девяносто тысяч знаков выше реплики, между чужими эпизодами
+    # памяти. Тот же факт теперь стоит в зоне «СЕЙЧАС» строками «место» и «говорит», прямо
+    # перед репликой: положение и тип, а не количество токенов.
+    # ⚠ Но под рычагом ОТКАТА зоны нет, и без этого тира название комнаты и имя собеседника
+    # исчезали из кадра ВОВСЕ — откат отдавал кадр хуже вчерашнего. Рычаг обязан вести назад,
+    # а не вбок, поэтому в старой форме тир возвращается дословно.
+    if not frame_layout.form_new():
+        channel_rows = []
+        if speaker:
+            channel_rows.append(json.dumps({"active_speaker": str(speaker)[:500]},
+                                           ensure_ascii=False))
+        if ctx.title:
+            channel_rows.append(json.dumps({"room_title": str(ctx.title)[:500]},
+                                           ensure_ascii=False))
+        if channel_rows:
+            tiers.append(("Current Telegram labels", "\n".join(channel_rows)))
     if desire_context:
         tiers.append(("Canonical desire continuity",
                       desire_context))
@@ -7312,16 +7341,22 @@ def _build_prompt_parts(
             raw_jsonl_tiers.add("Mutable operational continuity")
     # §6: бегущая сводка диалога — первым блоком (то, что уехало за пределы last_n);
     # приоритетнее сырого хвоста, поэтому идёт раньше карты/портрета.
+    # ⚠ Три тира — сводка, досье, эта комната — говорят о своей ПУСТОТЕ вслух: заголовок
+    # остаётся, тело не печатается, подпись называет причину. Список закрыт намеренно, и
+    # пустота печатается только там, где решение о тире вообще принималось.
     summary = read_summary(chat_id) if chat_id is not None else ""
-    if summary:
-        tiers.append(("Ранее в этом диалоге (сводка)", summary))
+    if chat_id is not None:
+        tiers.append(("Ранее в этом диалоге (сводка)",
+                      summary or frame_layout.void("сводки этого разговора ещё нет")))
     participant_cards = _participant_memory_block(speaker, ctx)
-    if participant_cards:
+    if participant_cards or ctx.principal_id is not None:
         # ⚠ Ярлык переписан вместе с содержимым: «короткие профили активных участников»
         # было неправдой дважды — профили больше не короткие (файл целиком) и не
         # «активных» (все, кого она знает, а не участники этой комнаты).
         tiers.append(("Мои досье на людей — ВСЕ И ЦЕЛИКОМ (внутреннее; что произнести "
-                      "вслух в этой комнате, решаю я)", participant_cards))
+                      "вслух в этой комнате, решаю я)",
+                      participant_cards or frame_layout.void(
+                          f"нет привязки tg {ctx.principal_id} → memory/people/*")))
     # Personal memory belongs to Praxis, not to the current speaker.  This map is an
     # internal orientation layer in every channel; it is not ready-made public copy.
     index_map = _memory_navigation_hint()
@@ -7375,9 +7410,12 @@ def _build_prompt_parts(
         # 10.3: профиль комнаты — mode-строка от первого лица + её секции, без машинной
         # шапки (drift-кольцо в промпт не течёт). Forum topic state is separate, but
         # room policy/identity always comes from its root Telegram peer.
-        room = rooms.context_from_text(_read(ROOMS_DIR / f"{room_profile_id}.md")).strip()
-        if room:
-            tiers.append(("Эта комната", room))
+        # ⚠ «профиль есть» — утверждение о ДИСКЕ, а тир добавляется по одному
+        # room_profile_id: спрашиваем диск, а не догадываемся.
+        room = rooms.context_from_text(_read(room_md := ROOMS_DIR / f"{room_profile_id}.md")).strip()
+        tiers.append(("Эта комната", room or frame_layout.void(
+            f"профиль rooms/{room_profile_id}.md есть, но её текста в нём нет"
+            if room_md.exists() else f"профиля rooms/{room_profile_id}.md на диске нет")))
     if scope == "group":
         # 10.6: визитка — честная самопрезентация в группе (публичные чертежи, закрытое живое)
         card = _read(SOUL_DIR / "visit_card.md").strip()
@@ -7413,48 +7451,57 @@ def _build_prompt_parts(
         # завёрнутым в json.dumps (переносы становятся \n, кавычки \"), jsonl-тир — телом
         # как есть. Пишется ДЛИНА БЛОКА: то, что реально заняло место в кадре и в бюджете.
         tier_kind = "jsonl" if title in raw_jsonl_tiers else "json"
-        if title in raw_jsonl_tiers:
-            # Тело уже построчный JSON — ярлык отдельной строкой, тело как есть.
-            # Длина считается ровно та, что уедет в кадр, поэтому бюджет не врёт.
-            head = json.dumps(
-                {"label": str(title), "format": "jsonl"},
-                ensure_ascii=False, separators=(",", ":"),
-            ) + "\n"
-            block = head + str(body).strip("\n") + "\n"
-        else:
-            block = json.dumps(
-                {"label": str(title), "content": str(body)},
-                ensure_ascii=False, separators=(",", ":"),
-            ) + "\n"
+        # ⚠ 05.08. Форма секции ушла в frame_layout: правило с заголовком, подпись СБОРЩИКА
+        # «↳ причина · путь · как отобрано · оговорки», тело настоящими переносами. json.dumps
+        # снят — вместе с его защитой, и её место занял гуттер: чужой байт входит в кадр
+        # двумя стоками, а не списком опасных начал.
+        block, cause, sign_chars = frame_layout.section(title, body, kind=tier_kind)
         if budget > 0 and used + len(block) > budget:
             dropped.append(title)
             frame_trace.absent("evidence.tier", "evidence", tier_kind, "context_budget",
-                               label=title, chars=len(block))
+                               label=title, chars=len(block), cause=cause)
             continue
         chosen.append(frame_trace.mark("evidence.tier", "evidence", tier_kind, block,
-                                       label=title))
+                                       label=title, cause=cause,
+                                       provenance_chars=sign_chars))
         used += len(block)
     # used_start — ТО ЖЕ выражение, которым считает код выше: прибор и код обязаны мерить
     # одной линейкой, иначе спор о числах не закроется, а сместится.
     frame_trace.note_budget(limit=budget, used_start=len(persona) + len(tail_text),
                             used_final=used, offered=len(tiers), included=len(chosen),
                             dropped=len(dropped))
+    frame_layout.stash(tiers_offered=len(tiers), tiers_included=len(chosen), writing=bool(writing),
+                       tiers_dropped=len(dropped), dossier=bool(participant_cards))
     if dropped:
         # P1: не режем молча — называем, что не влезло (можно достать через recall)
         chosen.append(frame_trace.mark("evidence.omitted_marker", "evidence", "marker",
         json.dumps({
             "label": "omitted_by_context_budget",
-            "content": "; ".join(dropped) + "; available through explicit recall",
-        }, ensure_ascii=False, separators=(",", ":")) + "\n"))
+            # ⚠ ЯРЛЫК САМ СОДЕРЖИТ «; » — и список, склеенный тем же разделителем,
+            # становится неразбираемым не только для теста, но и для НЕЁ. Печатаем
+            # ЗАГОЛОВОК ярлыка (без скобочной оговорки сборщика): он однозначен.
+            "content": "; ".join(frame_layout.split_title(name)[0] for name in dropped)
+                       + "; available through explicit recall",
+        }, ensure_ascii=False, separators=(",", ":")) + "\n", cause="прибор"))
 
     evidence = ""
     if chosen:
+        # ⚠ ПОРЯДОК РАЗМЕТКИ ОБРАТЕН ПОРЯДКУ ТЕКСТА. Легенда помечается ПЕРВОЙ и с
+        # `first=True`, чтобы шапка, помеченная следующей и тоже первой, встала перед ней:
+        # склейка меток обязана совпадать с кадром байт-в-байт, а обе строки вычисляются
+        # последними, стоя в кадре первыми. Пометить в порядке чтения значило бы получить
+        # honesty.ok=false — прибор, который врёт геометрией, хуже отсутствующего.
+        legend_marked = (frame_trace.mark("evidence.legend", "evidence", "text",
+                                          frame_layout.legend(), cause="ядро", first=True)
+                         if frame_layout.form_new() else "")
         evidence = (
             # first=True: шапка вычисляется последней, а в кадре стоит первой.
             frame_trace.mark("evidence.header", "evidence", "text",
             "# My live memory and channel context\n"
             "These are my own canonical or explicitly labelled continuity sources. I decide what they "
-            "mean and may inspect their source paths when provenance matters.\n", first=True)
+            "mean and may inspect their source paths when provenance matters.\n",
+                             first=True, cause="ядро")
+            + legend_marked
             + "".join(chosen)
         )
     return persona, tail_text, evidence
@@ -11946,7 +11993,8 @@ def _terminal_tool_loop(*, system, messages: list[dict], tools: list,
     return reply
 
 
-def _with_context_evidence(user_msg: str | list[dict], evidence: str) -> str | list[dict]:
+def _with_context_evidence(user_msg: str | list[dict], evidence: str,
+                           situation: str = "") -> str | list[dict]:
     """Attach Praxis-owned continuity at user role without pretending it was speaker prose.
 
     Most model APIs expose only system/user/assistant/tool roles.  A visibly separated
@@ -11961,9 +12009,29 @@ def _with_context_evidence(user_msg: str | list[dict], evidence: str) -> str | l
                                fold_chars=0, closing_chars=0, flat_form=1)
         return user_msg
     lead = "<praxis_context_evidence>\n"
-    fold = "\n</praxis_context_evidence>\n\n<current_user_message>\n"
+    # Открывающий тег реплики ПОДПИСАН: автор, telegram id и номер сообщения — из тех же
+    # транспортных полей, что и строка «говорит», из одного снимка. Под старой формой и при
+    # пустом снимке возвращается прежний голый тег байт-в-байт.
+    fold_head, fold_tail = "\n</praxis_context_evidence>\n", frame_layout.reply_open()
+    fold = fold_head + str(situation or "") + fold_tail
     opening = lead + material + fold
     closing = "\n</current_user_message>"
+    # Теги конверта — НАШИ строки, и они обязаны быть объявлены, иначе `assay` назовёт
+    # утечкой собственную разметку кадра.
+    frame_trace.declare("evidence.envelope", lead + fold_head + fold_tail + closing)
+    # ⚠ Реплика человека — тоже недоверенный текст. Сообщение со строками
+    # `</current_user_message>` и `<CURRENT_SITUATION>` рисовало в кадре ВТОРУЮ зону ниже
+    # настоящей. Развилка `isinstance(str)` осталась развилкой УПАКОВКИ, а не обезвреживания:
+    # фото с подписью приходит СПИСКОМ блоков, и подпись мимо замка не проходит.
+    if frame_layout.form_new():
+        if isinstance(user_msg, str):
+            user_msg = frame_layout.quote(user_msg)
+        else:
+            user_msg = [
+                dict(block, text=frame_layout.quote(block.get("text") or ""))
+                if isinstance(block, dict) and block.get("type") == "text" else block
+                for block in user_msg
+            ]
     # Прибор: зона evidence — ровно та строка, что вернул билдер; как она легла в чужой
     # контейнер, описывает отдельная запись embed наблюдёнными числами. prefix_chars — то,
     # что стоит ПЕРЕД материалом, suffix_chars — обёртка после него, без текста самой
@@ -11981,12 +12049,18 @@ def _with_context_evidence(user_msg: str | list[dict], evidence: str) -> str | l
                            fold_chars=len(fold), closing_chars=len(closing),
                            flat_form=1 if isinstance(user_msg, str) else 0)
     if isinstance(user_msg, str):
-        return opening + user_msg + closing
-    return [
-        {"type": "text", "text": opening},
-        *list(user_msg),
-        {"type": "text", "text": closing},
-    ]
+        current = opening + user_msg + closing
+        blocks = None
+    else:
+        blocks = [{"type": "text", "text": opening}, *list(user_msg),
+                  {"type": "text", "text": closing}]
+        # ⚠ Прибор бежит по СКЛЕЙКЕ всех текстовых блоков, а не по str-ветке: иначе
+        # мультимодальный ход остался бы неизмеренным ровно там, где он и был не обезврежен.
+        current = "\n".join(str(b.get("text") or "") for b in blocks
+                            if isinstance(b, dict) and b.get("type") == "text")
+    if frame_layout.form_new():
+        frame_layout.assay(current)
+    return current if blocks is None else blocks
 
 
 def _voice_impl(
@@ -12024,8 +12098,18 @@ def _voice_impl(
         speaker, query=recall_query, ctx=ctx,
     )
     evidence_parts = [memory_evidence.strip()] if memory_evidence.strip() else []
-    runtime_block = ("# Runtime continuity for this run\n" + str(extra_evidence).strip()
-                     if str(extra_evidence or "").strip() else "")
+    # ⚠ СОСЕД ПО КОНВЕРТУ — ТОЖЕ ЧУЖОЙ ТЕКСТ. `extra_evidence` приходит из ориентации хода
+    # и уезжает в тот же конверт evidence; пока он ехал голым, любая его строка вставала в
+    # колонку 0 рядом с нашими заголовками. Тело идёт под гуттер, а шапка — наша строка и
+    # объявляется прибору, иначе он назовёт утечкой собственную разметку кадра.
+    runtime_head = "# Runtime continuity for this run\n"
+    if str(extra_evidence or "").strip():
+        body = str(extra_evidence).strip()
+        runtime_block = runtime_head + (frame_layout.quote(body)
+                                        if frame_layout.form_new() else body)
+        frame_trace.declare("evidence.runtime", runtime_head)
+    else:
+        runtime_block = ""
     if runtime_block:
         evidence_parts.append(runtime_block)
     # Прибор: сколько съел .strip() и какой сосед приехал в тот же конверт. Бюджет
@@ -12037,10 +12121,37 @@ def _voice_impl(
         siblings_chars=len(runtime_block),
         separator_chars=(2 if len(evidence_parts) > 1 else 0),
     )
-    current_user = _with_context_evidence(user_msg, "\n\n".join(evidence_parts))
-    messages = history[-HISTORY_TURNS:] + [{
+    # ⚠ ЛЕНТА РАЗГОВОРА — НАБЛЮДЁННЫМИ ЧИСЛАМИ. Её требование: точное число доставленных
+    # сообщений, граница выборки, источник и ЯВНАЯ пометка об обрезке. Считается ровно
+    # здесь, где обе величины ещё видны: `history` — всё, что дал источник, срез — то, что
+    # вправду уедет. Число тиров на этот вопрос не отвечает и отвечать не имеет права.
+    frame_layout.stash(tape_delivered=len(history[-HISTORY_TURNS:]),
+                       tape_available=len(history), tape_limit=HISTORY_TURNS,
+                       tape_source=("ролевая лента разговора" if history else ""))
+    # Пятая зона кадра. Строится ЗДЕСЬ: только отсюда видно, есть ли у неё дом (конверт
+    # evidence) и предложены ли руки — от второго зависит, вправе ли прибор сказать «последней».
+    situation = frame_layout.situation(ctx, speaker=speaker, home=bool(evidence_parts),
+                                       tooled=not (no_tools or tools_override == []))
+    current_user = _with_context_evidence(user_msg, "\n\n".join(evidence_parts), situation)
+    # ⚠ ГУТТЕР НА ВСЮ ЛЕНТУ, И РОВНО ОДИН РАЗ — ПРИ РЕНДЕРЕ. До этого позиционная гарантия
+    # действовала один ход: история клалась сюда как есть, и подделка, приехавшая ходом
+    # раньше, стояла в колонке 0 следующие сто ролевых блоков. Хранилище не трогается —
+    # `memory_life`, кольцо ходов и расписки держат дословный текст без единого «>».
+    messages = frame_layout.tape(history[-HISTORY_TURNS:]) + [{
         "role": "user", "content": current_user,
     }]
+    # ⚠ ПРИБОР НАД ВСЕЙ ЛЕНТОЙ, А НЕ НАД ПОСЛЕДНИМ СООБЩЕНИЕМ. `assay` судит `messages[-1]`;
+    # история приклеивается ровно здесь — подделка, приехавшая ходом раньше, стоит в колонке 0
+    # следующие сто ролевых блоков и прибору невидима. Числа отсюда БУДУТ красными, пока
+    # гуттер не начнёт накладываться при рендере на весь разговор: зелёный прибор над
+    # незащищённой лентой хуже отсутствующего.
+    # ⚠ В расписку едут ТОЛЬКО числа: образец — кусок содержимого кадра, а расписка ходит
+    # дальше кадра и живёт дольше него.
+    if frame_layout.form_new():
+        seen = frame_layout.assay_tape(messages)
+        frame_trace.note_embed("evidence",
+                               **{key: value for key, value in seen.items()
+                                  if isinstance(value, int) and not isinstance(value, bool)})
     # §6: компактирование берёт на себя дешёвый субагент (agent.compact), её голос на это
     # больше не тратится. Старая авто-подсказка — только если явно включена (ручной режим).
     if len(history) >= CONSOLIDATE_AT and os.getenv("PRAXIS_CONSOLIDATE_NUDGE", "0").lower() in ("1", "true", "yes", "on"):
@@ -12057,7 +12168,8 @@ def _voice_impl(
     system = _system(persona, dynamic)  # персона кэшируется, хвост свежий
     # Точка правды следа. На возврате билдера снимать смещения было бы ложью: к этой
     # строке хвост уже дописан (extra_system, подсказка компактирования).
-    frame_trace.seal(persona=persona, dynamic=dynamic, evidence=memory_evidence, system=system)
+    frame_trace.seal(persona=persona, dynamic=dynamic, evidence=memory_evidence, system=system,
+                     situation=situation)
     if tools_override is not None:
         tools = list(tools_override)  # PASS 12.1 (ревизия 06.07): именованный safe-набор
     elif no_tools:

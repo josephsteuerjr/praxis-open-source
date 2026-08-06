@@ -62,10 +62,26 @@ import json
 import os
 
 SCHEMA = "praxis.frame-trace.v1"
-ROSTER = "v1"
+# ⚠ Версия реестра двинулась вместе с реестром: v1 → v2 добавила пятую зону кадра
+# (`situation`) и её закрытый список из восьми имён. Молчаливое расширение реестра при
+# прежнем номере означало бы, что расписки разных форм неразличимы задним числом.
+ROSTER = "v2"
+
+# Восемь имён зоны «СЕЙЧАС»: открывающий тег, ШЕСТЬ строк и закрывающий. Список ЗАКРЫТ —
+# строка, которой здесь нет, краснит стенд сама, без правки списка. Середина обязана
+# дословно совпадать с `frame_layout.LABELS`: два похожих списка разошлись бы молча.
+SITUATION_ROSTER = (
+    "situation.open",
+    "situation.place", "situation.speaker", "situation.address",
+    "situation.timing", "situation.feed", "situation.working",
+    "situation.close",
+)
 
 # Две последние зоны зарезервированы под этап 2: разговор и схемы рук сегодня не размечены.
-ZONES = ("persona", "dynamic", "evidence", "messages", "tools")
+# ⚠ `situation` — пятая зона кадра (`<CURRENT_SITUATION>`). Она лежит ВНУТРИ конверта
+# evidence, но меряется отдельно: иначе её длина растворяется в чужом числе, и вопрос
+# «сколько стоит зона» становится неотвечаемым.
+ZONES = ("persona", "dynamic", "evidence", "situation", "messages", "tools")
 KINDS = ("md", "text", "json", "jsonl", "frame", "marker")
 REASONS = ("context_budget", "empty", "branch", "cap")
 
@@ -89,7 +105,9 @@ BUDGET_EXCLUDES = ("evidence_header", "extra_system", "extra_evidence",
 # Что этап 1 измеряет и чего не измеряет. Публикуется в самом конверте: читатель, который
 # сложит bytes трёх зон и назовёт это «её кадром», ошибётся — схемы рук и разговор весят
 # своё, и молчание об этом было бы занижением, а не скромностью.
-COVERS = ("persona", "dynamic", "evidence")
+# ⚠ Пятая зона измеряется наравне с тремя: назвать её неизмеренной значило бы
+# сказать, что кадр меряется не весь, тогда как зона как раз меряется точнее всех.
+COVERS = ("persona", "dynamic", "evidence", "situation")
 UNMEASURED = ("messages", "tools")
 
 MAX_SECTIONS = 128              # сверх — публикуем первые и говорим об этом в caps
@@ -199,10 +217,12 @@ def _encode(payload: dict) -> bytes:
 
 class _Rec:
     __slots__ = ("name", "zone", "kind", "label", "variant",
-                 "included", "reason", "text", "offset", "chars", "nbytes")
+                 "included", "reason", "text", "offset", "chars", "nbytes",
+                 "cause", "provenance")
 
     def __init__(self, name: str, zone: str, kind: str, *, label: str, variant: str,
-                 included: bool, reason: str, text, chars: int) -> None:
+                 included: bool, reason: str, text, chars: int,
+                 cause: str = "", provenance: int = 0) -> None:
         self.name = name
         self.zone = zone
         self.kind = kind
@@ -214,6 +234,10 @@ class _Rec:
         self.offset = -1
         self.chars = chars
         self.nbytes = -1
+        # Причина включения (пятый вопрос кадра) и длина подписи сборщика. Пишутся тем,
+        # кто СОБИРАЛ секцию: прибор их не выводит и не угадывает.
+        self.cause = str(cause or "")
+        self.provenance = int(provenance or 0)
 
 
 class Trace:
@@ -222,7 +246,8 @@ class Trace:
     __slots__ = ("mode", "usable", "sealed", "overflow",
                  "_by_zone", "_count", "budget", "counts", "embed",
                  "zones", "honesty", "frame_id", "verify_id",
-                 "system_form", "dynamic_offset", "emits", "emit_seq")
+                 "system_form", "dynamic_offset", "emits", "emit_seq", "declared",
+                 "positions")
 
     def __init__(self, trace_mode: str) -> None:
         self.mode = trace_mode
@@ -242,6 +267,10 @@ class Trace:
         self.dynamic_offset: int | None = None
         self.emits: dict[str, int] = {}
         self.emit_seq = 0
+        # Реестр НАШИХ строк этого кадра — предмет утверждения (в) прибора.
+        self.declared: set = set()
+        # Где зона физически стоит в кадре. Наблюдение сборщика, не вывод прибора.
+        self.positions: dict = {}
 
     # --- разметка ---
 
@@ -287,6 +316,10 @@ class Trace:
                     row["label"] = rec.label
                 if rec.variant:
                     row["variant"] = rec.variant
+                if rec.cause:
+                    row["cause"] = rec.cause
+                if rec.provenance:
+                    row["provenance_chars"] = int(rec.provenance)
                 out.append(row)
         return out
 
@@ -344,7 +377,8 @@ def capture():
 
 
 def mark(name: str, zone: str, kind: str, text: str, *,
-         label: str = "", variant: str = "", first: bool = False) -> str:
+         label: str = "", variant: str = "", first: bool = False,
+         cause: str = "", provenance_chars: int = 0) -> str:
     """Вернуть `text` ТЕМ ЖЕ ОБЪЕКТОМ, попутно записав отрезок. Никогда не бросает.
 
     Возврат того же объекта — не косметика: он позволяет обернуть метку прямо вокруг
@@ -361,14 +395,24 @@ def mark(name: str, zone: str, kind: str, text: str, *,
             return text
         trace._add(_Rec(str(name), str(zone), str(kind), label=str(label),
                         variant=str(variant), included=True, reason="",
-                        text=text, chars=len(text)), first=bool(first))
+                        text=text, chars=len(text), cause=cause,
+                        provenance=provenance_chars), first=bool(first))
+        # ⚠ НАШИ виды метки сами попадают в реестр объявленного. `text` и `marker` — это
+        # проза и разметка СБОРЩИКА (шапка, легенда, теги зоны); `json`/`jsonl` — тир,
+        # внутри которого лежит чужое тело, и объявлять его целиком значило бы выдать
+        # гостя за себя. Различение по виду, а не по имени: список имён снова пришлось бы
+        # дополнять, а вид назначает тот, кто секцию собрал.
+        if str(kind) in ("text", "marker"):
+            for line in text.split("\n"):
+                if line:
+                    trace.declared.add(line)
     except Exception:
         pass
     return text
 
 
 def absent(name: str, zone: str, kind: str, reason: str, *,
-           label: str = "", chars: int = 0) -> None:
+           label: str = "", chars: int = 0, cause: str = "") -> None:
     """Объявить «секции нет и вот почему». Никогда не бросает.
 
     Три разных нуля — это три РАЗНЫЕ записи: «ветка не выбрана» (branch), «источник пуст»
@@ -382,7 +426,55 @@ def absent(name: str, zone: str, kind: str, reason: str, *,
             return
         trace._add(_Rec(str(name), str(zone), str(kind), label=str(label),
                         variant="", included=False, reason=str(reason),
-                        text=None, chars=int(chars or 0)), first=False)
+                        text=None, chars=int(chars or 0), cause=cause), first=False)
+    except Exception:
+        pass
+
+
+def declare(name: str, text: str) -> str:
+    """Объявить строки как СОБРАННЫЕ НАМИ. Возвращает `text` тем же объектом.
+
+    ⚠ Зачем отдельно от `mark`. `assay` спрашивает про КАЖДУЮ физическую строку кадра:
+    либо её выдал сток гуттера, либо она дословно объявлена эмиттером. Разметка `mark`
+    для этого не годится — она пишет ОТРЕЗКИ (тир целиком, вместе с чужим телом), а
+    реестру нужны отдельные строки: теги конверта, шапка соседа, легенда.
+
+    Без реестра прибор назвал бы утечкой собственную разметку кадра — и «утечек» стало бы
+    больше, чем строк, то есть число перестало бы что-либо значить.
+    """
+    try:
+        trace = _CURRENT.get()
+        if trace is None or trace.sealed or not isinstance(text, str):
+            return text
+        for line in text.split("\n"):
+            if line:
+                trace.declared.add(line)
+    except Exception:
+        pass
+    return text
+
+
+def declared() -> set:
+    """Строки, объявленные нами в ЭТОМ кадре. Пусто — прибор выключен или кадр не начат."""
+    try:
+        trace = _CURRENT.get()
+        return set(trace.declared) if trace is not None else set()
+    except Exception:
+        return set()
+
+
+def note_position(zone: str, value: str) -> None:
+    """Где зона стоит в кадре. Строка, а не число, — поэтому не `note_embed`.
+
+    ⚠ «Последняя перед репликой» — утверждение, которое верно НЕ ВСЕГДА: когда в ходе
+    предложены руки, между зоной и её ответом встают результаты тулов. Прибор обязан
+    печатать наблюдённое, а положение знает только тот, кто зону собирал.
+    """
+    try:
+        trace = _CURRENT.get()
+        if trace is None or trace.sealed:
+            return
+        trace.positions[str(zone)] = str(value)
     except Exception:
         pass
 
@@ -435,15 +527,20 @@ def _containers(system, evidence: str) -> dict:
         "persona": persona_container,
         "dynamic": dynamic_container,
         "evidence": "messages[-1]" if str(evidence or "") else "(absent)",
+        # Зона «сейчас» живёт в том же последнем сообщении, между закрытым конвертом и
+        # открытой репликой. Пустая зона — «(absent)», а не ноль без имени.
+        "situation": "messages[-1] · после </praxis_context_evidence>",
     }
 
 
-def _seal_impl(trace: Trace, persona: str, dynamic: str, evidence: str, system) -> None:
-    actual = {"persona": persona, "dynamic": dynamic, "evidence": evidence}
+def _seal_impl(trace: Trace, persona: str, dynamic: str, evidence: str, system,
+               situation: str = "") -> None:
+    actual = {"persona": persona, "dynamic": dynamic, "evidence": evidence,
+              "situation": situation}
     containers = _containers(system, evidence)
     zones_out: list[dict] = []
     honesty: dict = {"ok": True}
-    for zone in ("persona", "dynamic", "evidence"):
+    for zone in ("persona", "dynamic", "evidence", "situation"):
         included = [rec for rec in trace._by_zone.get(zone, ()) if rec.included]
         marked = "".join(rec.text if isinstance(rec.text, str) else "" for rec in included)
         real = actual[zone] if isinstance(actual[zone], str) else ""
@@ -456,7 +553,8 @@ def _seal_impl(trace: Trace, persona: str, dynamic: str, evidence: str, system) 
             offset += rec.chars
         row: dict = {
             "zone": zone,
-            "container": containers[zone],
+            "container": (containers[zone] if actual[zone] or zone != "situation"
+                          else "(absent)"),
             "chars": len(real),
             "bytes": len(real.encode("utf-8")),
             "sha256": hashlib.sha256(real.encode("utf-8")).hexdigest(),
@@ -465,6 +563,11 @@ def _seal_impl(trace: Trace, persona: str, dynamic: str, evidence: str, system) 
         embedded = trace.embed.get(zone)
         if embedded:
             row["embed"] = {key: int(value) for key, value in sorted(embedded.items())}
+        if zone in trace.positions:
+            # Положение зоны снял тот, кто её собирал: прибор его переносит, а не выводит.
+            # Лежит в `embed` рядом с числами наблюдений, а не в шапке зоны: это тоже
+            # наблюдение о кадре, просто не количественное.
+            row.setdefault("embed", {})["position"] = trace.positions[zone]
         zones_out.append(row)
         if marked != real and honesty.get("ok"):
             # Смещения ВСЁ РАВНО публикуются: они описывают то, что было размечено.
@@ -480,7 +583,8 @@ def _seal_impl(trace: Trace, persona: str, dynamic: str, evidence: str, system) 
         trace.usable = False
 
 
-def seal(*, persona: str, dynamic: str, evidence: str, system) -> None:
+def seal(*, persona: str, dynamic: str, evidence: str, system,
+         situation: str = "") -> None:
     """Опечатать след: сверить склейку, посчитать смещения и СБРОСИТЬ ссылки на тексты.
 
     Вызывается ровно один раз, на шве сборки кадра, ПОСЛЕ `system = _system(...)`. Точка
@@ -493,7 +597,8 @@ def seal(*, persona: str, dynamic: str, evidence: str, system) -> None:
     try:
         _seal_impl(trace, persona if isinstance(persona, str) else "",
                    dynamic if isinstance(dynamic, str) else "",
-                   evidence if isinstance(evidence, str) else "", system)
+                   evidence if isinstance(evidence, str) else "", system,
+                   situation if isinstance(situation, str) else "")
     except Exception:
         # Прибор сломался — он умолкает, а не роняет её ход.
         trace.usable = False

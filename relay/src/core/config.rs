@@ -25,7 +25,8 @@ impl Config {
         // Check if auth.json exists in ./local_auth directory (fallback)
         let local_auth_dir = std::env::current_dir()?.join("local_auth");
         let local_auth_file = local_auth_dir.join("auth.json");
-        if local_auth_file.exists() {
+        let primary_profile = local_auth_dir.join("accounts").join("primary").join("auth.json");
+        if local_auth_file.exists() || primary_profile.exists() {
             return Ok(Config {
                 codex_home: local_auth_dir,
                 chatgpt_base_url: "https://chatgpt.com/backend-api/codex".to_string(),

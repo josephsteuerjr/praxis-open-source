@@ -37,6 +37,7 @@ from unittest import mock
 os.environ.setdefault("PRAXIS_TEST", "1")
 
 import agent  # noqa: E402
+import frame_layout  # noqa: E402
 import frame_trace  # noqa: E402
 import run_context  # noqa: E402
 import run_manager  # noqa: E402
@@ -240,7 +241,9 @@ class TheJoinOfMarksIsTheZoneItself(FrameBase):
     def test_zone_honesty_and_hashes_are_published(self):
         seen = self.run_turn()
         zones = {row["zone"]: row for row in seen["meta"]["zones"]}
-        self.assertEqual(set(zones), {"persona", "dynamic", "evidence"})
+        # Пятая зона кадра публикуется наравне с тремя: она лежит внутри конверта
+        # evidence, но меряется отдельно — иначе её длина растворяется в чужом числе.
+        self.assertEqual(set(zones), {"persona", "dynamic", "evidence", "situation"})
         for row in zones.values():
             self.assertTrue(row["honest"], row)
         self.assertEqual(
@@ -373,7 +376,9 @@ class TheBudgetIsMeasuredWithTheSameRuler(FrameBase):
                 continue
             if row.get("label") == "omitted_by_context_budget":
                 spoken = row["content"]
-        traced = {r["label"] for r in rows
+        # Кадр называет выброшенное ЗАГОЛОВКОМ ярлыка: скобочная оговорка сборщика в
+        # список не едет, иначе разделитель «; » встретился бы внутри самого ярлыка.
+        traced = {frame_layout.split_title(r["label"])[0] for r in rows
                   if r.get("reason") == "context_budget" and r.get("label")}
         named = {part.strip() for part in spoken.split(";")
                  if part.strip() and part.strip() != "available through explicit recall"}
@@ -541,7 +546,10 @@ class TheReceiptCarriesTheTraceAndResumeSurvivesIt(ReceiptBase):
         self.assertEqual(len(rows), 1)
         meta = rows[0]["metadata"]
         self.assertEqual(meta["schema"], "praxis.frame-trace.v1")
-        self.assertEqual(meta["roster"], "v1")
+        # ⚠ Реестр двинулся вместе с кадром: v2 добавила пятую зону «сейчас» и её
+        # закрытый список из восьми имён. Прежний номер при новом составе означал бы,
+        # что расписки двух разных форм неразличимы задним числом.
+        self.assertEqual(meta["roster"], "v2")
         self.assertEqual(meta["basis"], "live")
         self.assertEqual(meta["emit"], 1)
 
@@ -885,14 +893,32 @@ class NoTokensAndNoContent(FrameBase):
 
     def test_tier_labels_are_code_literals_and_may_travel(self):
         seen = self.run_turn()
-        labels = {row["label"] for row in seen["meta"]["sections"] if row.get("label")}
+        # ⚠ Ярлыки теперь двух ПОРОД: у тира — заголовок секции, у строки зоны «сейчас» —
+        # её собственная подпись слева. Смешивать их в одну сверку значит спрашивать с
+        # каждого чужую форму; поэтому две проверки, а не одна размытая.
+        labels = {row["label"] for row in seen["meta"]["sections"]
+                  if row.get("label") and row.get("name") == "evidence.tier"}
+        zone_labels = {row["label"] for row in seen["meta"]["sections"]
+                       if row.get("label") and str(row.get("zone")) == "situation"}
         self.assertTrue(labels, "ни одного ярлыка — сверка выше вакуумна")
         evidence_text = seen["messages"][-1]["content"]
         if not isinstance(evidence_text, str):
             evidence_text = "".join(str(b.get("text", "")) for b in evidence_text
                                     if isinstance(b, dict))
+        # ⚠ Ярлык ПРИЕЗЖАЕТ В КАДР РАЗОБРАННЫМ, а не строкой: заголовок стоит в правиле
+        # секции капсом, а скобочный хвост — это оговорка СБОРЩИКА и живёт в подписи.
+        # Предмет теста от этого не меняется: ярлык обязан быть литералом кода, который
+        # ВИДЕН в кадре целиком, — просто видимость проверяется по обеим его частям.
         for label in labels:
-            self.assertIn(label, evidence_text, "ярлык следа не из кадра — это новая утечка")
+            head, remark = frame_layout.split_title(label)
+            self.assertIn(head.upper(), evidence_text,
+                          "заголовок ярлыка не из кадра — это новая утечка")
+            if remark:
+                self.assertIn(remark, evidence_text,
+                              "оговорка ярлыка исчезла из кадра — сказанное потерялось")
+        for label in zone_labels:
+            self.assertIn(label, evidence_text,
+                          "ярлык строки зоны не из кадра — это новая утечка")
 
 
 class TheEvidenceEnvelopeIsDescribedHonestly(FrameBase):
@@ -912,9 +938,16 @@ class TheEvidenceEnvelopeIsDescribedHonestly(FrameBase):
         zone = next(z for z in seen["meta"]["zones"] if z["zone"] == "evidence")
         embed = zone["embed"]
         self.assertEqual(embed["prefix_chars"], len("<praxis_context_evidence>\n"))
+        # ⚠ Хвост конверта вырос ДВАЖДЫ: между закрытием evidence и открытием реплики
+        # встала зона «СЕЙЧАС», а сам тег реплики ПОДПИСАН (author/tg/message). Литерал
+        # голого тега стал бы здесь обещанием, которого кадр не даёт: сверка берёт ту же
+        # строку у того же кода, что её печатает, и длину зоны — из её же записи.
+        reply_open = frame_layout.reply_open()
+        situation_chars = next((row["chars"] for row in seen["meta"]["zones"]
+                                if row["zone"] == "situation"), 0)
         self.assertEqual(embed["suffix_chars"],
-                         len("\n</praxis_context_evidence>\n\n<current_user_message>\n")
-                         + len("\n</current_user_message>"))
+                         len("\n</praxis_context_evidence>\n") + len(reply_open)
+                         + len("\n</current_user_message>") + situation_chars)
         tail = seen["messages"][-1]["content"]
         text = tail if isinstance(tail, str) else "".join(
             str(b.get("text", "")) for b in tail if isinstance(b, dict))
@@ -1007,7 +1040,8 @@ class TheInstrumentIsActuallyBoundOnTheLiveSeam(FrameBase):
         self.assertTrue(seen["sections"], "на боевом шве не записано ни одной секции")
         self.assertIsNotNone(seen["meta"], "боевая расписка осталась без следа")
         self.assertTrue(seen["meta"]["honesty"]["ok"])
-        self.assertEqual(seen["meta"]["covers"], ["persona", "dynamic", "evidence"])
+        self.assertEqual(seen["meta"]["covers"],
+                         ["persona", "dynamic", "evidence", "situation"])
 
     def test_the_trace_is_released_when_the_turn_ends(self):
         with mock.patch.object(agent, "_terminal_tool_loop",
@@ -1025,7 +1059,9 @@ class TheEnvelopeNamesWhatItDidNotMeasure(FrameBase):
 
     def test_covers_and_unmeasured_are_published(self):
         meta = self.run_turn()["meta"]
-        self.assertEqual(meta["covers"], ["persona", "dynamic", "evidence"])
+        # Пятая зона меряется наравне с тремя — назвать её неизмеренной значило бы
+        # сказать, что кадр меряется не весь.
+        self.assertEqual(meta["covers"], ["persona", "dynamic", "evidence", "situation"])
         self.assertEqual(meta["unmeasured"], ["messages", "tools"])
         measured = {row["zone"] for row in meta["zones"]}
         self.assertEqual(measured, set(meta["covers"]),

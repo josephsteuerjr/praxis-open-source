@@ -235,7 +235,8 @@ class TestSystemPrompt(Base):
                       "её собственная память снова не доехала")
         self.assertIn("СЕКРЕТ_МАРИИ", evidence,
                       "досье третьего человека не доехало")
-        self.assertIn("Карта памяти", evidence, "нет INDEX.md")
+        # Ярлык приезжает ЗАГОЛОВКОМ секции, капсом: литерала в кадре больше нет.
+        self.assertIn("КАРТА ПАМЯТИ", evidence, "нет INDEX.md")
         self.assertIn("memory/maps/PEOPLE.md", evidence)
 
     def test_owner_hint(self):
@@ -313,10 +314,19 @@ class TestSystemPrompt(Base):
         ctx = agent.ChannelContext(is_dm=False, chat_id="-100", title="abstractDL", size=800)
         _persona, system, evidence = agent._build_prompt_parts(speaker="кто-то", ctx=ctx)
         self.assertNotIn("abstractDL", system)
-        self.assertIn("abstractDL", evidence)
+        # ⚠ 06.08: НАЗВАНИЕ КОМНАТЫ ПЕРЕЕХАЛО ИЗ evidence В ЗОНУ «СЕЙЧАС». Прежде оно жило
+        # тиром «Current Telegram labels» — на девяносто тысяч знаков выше реплики, между
+        # чужими эпизодами памяти. Теперь стоит строкой «место» прямо перед её ответом:
+        # тот же факт, но положением и типом, а не количеством токенов. Свойство, ради
+        # которого тест писался («осознанность чата долетает до голоса, но не как власть»),
+        # проверяется сильнее — отдельной зоной, а не подстрокой в общей куче.
+        self.assertNotIn("abstractDL", evidence)
+        zone = agent.frame_layout.situation(ctx, speaker="кто-то")
+        self.assertIn("abstractDL", zone)
+        self.assertIn("аудитория=group", zone)
         self.assertIn("kind=group", system)
         self.assertIn("members=800", system)
-        self.assertNotIn("Карта памяти", evidence)
+        self.assertNotIn("КАРТА ПАМЯТИ", evidence)
 
 
 class TestRecall(Base):

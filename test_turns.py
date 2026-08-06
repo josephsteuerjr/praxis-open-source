@@ -188,8 +188,16 @@ class TestTurnsCore(TurnsBase):
                       for f in (turns.ARCHIVE_DIR / "rooms").rglob("turns-*.jsonl")
                       for l in f.read_text(encoding="utf-8").splitlines() if l.strip()]
         self.assertTrue(rooms_rows)
-        self.assertEqual(rooms_rows[0]["meta"]["origin"]["scope"], "group")
-        self.assertEqual(rooms_rows[0]["meta"]["origin"]["chat_id"], "-1001999")
+        # ⚠ Сверка шла по `rooms_rows[0]`, а порядок здесь задаёт `rglob` — то есть
+        # файловая система. Комнат в этом стенде две, и на другом хосте первой оказывалась
+        # другая: тест краснел, ничего не поймав. Предмет теста — что КАЖДЫЙ ход комнаты
+        # несёт метку происхождения, а нужная комната среди них есть; порядок к этому
+        # отношения не имеет и не должен решать вердикт.
+        origins = [row["meta"]["origin"] for row in rooms_rows]
+        for origin in origins:
+            self.assertEqual(origin["scope"], "group")
+            self.assertTrue(origin.get("chat_id"), "ход комнаты без метки происхождения")
+        self.assertIn("-1001999", [origin["chat_id"] for origin in origins])
 
         # 3. Граница держится ПРАВИЛОМ, а не тем, что тест смотрит не туда. Ход комнаты
         #    индексируется отдельным видом `room_turn` — то есть находится явным

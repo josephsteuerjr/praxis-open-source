@@ -9,12 +9,13 @@ use anyhow::{anyhow, bail, Context, Result};
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use chrono::Utc;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+use tracing::warn;
 
-use crate::core::config::Config;
-use crate::login::lib::{AuthMode, CodexAuth};
+use crate::core::account_router::{AccountLease, AccountRouter};
 
 const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_USER_AGENT: &str = "codex_cli_rs/0.144.0";
@@ -23,7 +24,7 @@ const MAX_USAGE_BODY_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Default)]
 pub struct LimitsCache {
-    inner: Arc<Mutex<Option<CachedLimits>>>,
+    inner: Arc<Mutex<HashMap<String, CachedLimits>>>,
 }
 
 struct CachedLimits {
@@ -32,48 +33,62 @@ struct CachedLimits {
 }
 
 impl LimitsCache {
-    pub async fn get(&self, config: &Config) -> Result<Value> {
+    pub async fn get(&self, router: &AccountRouter) -> Result<Value> {
+        let active = router.lease_active().await?;
+        let mut value = self.get_for_account(&active).await?;
+        let mut serving = active;
+
+        // A limits poll is itself an authoritative exhaustion signal.  Switch
+        // before returning so the whole relay, not just this caller, observes
+        // the standby as active.
+        if subscription_exhausted(&value) && router.account_count() > 1 {
+            match router.switch_after_quota(&serving).await {
+                Ok(standby) => {
+                    serving = standby;
+                    value = self.get_for_account(&serving).await?;
+                }
+                Err(error) => warn!("subscription failover from limits signal failed: {}", error),
+            }
+        }
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "relay_account".to_string(),
+                json!({
+                    "active_slot": serving.slot,
+                    "configured_slots": router.account_count(),
+                }),
+            );
+        }
+        Ok(value)
+    }
+
+    async fn get_for_account(&self, account: &AccountLease) -> Result<Value> {
         // Holding this small async mutex through the refresh also prevents a
         // status-page burst from fanning out into several upstream requests.
         let mut guard = self.inner.lock().await;
-        if let Some(cached) = guard.as_ref() {
+        if let Some(cached) = guard.get(&account.slot) {
             if cached.fetched.elapsed() < CACHE_TTL {
                 return Ok(cached.value.clone());
             }
         }
 
-        let value = fetch_usage(config).await?;
-        *guard = Some(CachedLimits {
-            fetched: Instant::now(),
-            value: value.clone(),
-        });
+        let value = fetch_usage(account).await?;
+        guard.insert(
+            account.slot.clone(),
+            CachedLimits {
+                fetched: Instant::now(),
+                value: value.clone(),
+            },
+        );
         Ok(value)
     }
 }
 
-async fn fetch_usage(config: &Config) -> Result<Value> {
-    let auth = CodexAuth::from_codex_home(&config.codex_home)
-        .context("failed to load Codex authentication")?
-        .ok_or_else(|| anyhow!("Codex authentication is not configured"))?;
-    if auth.mode != AuthMode::ChatGPT {
-        bail!("ChatGPT authentication is required for subscription limits");
-    }
-    let tokens = auth
-        .get_token_data()
-        .await
-        .context("failed to refresh Codex authentication")?;
-    if tokens.access_token.is_empty() {
-        bail!("Codex access token is empty");
-    }
-    let account_id = tokens
-        .account_id
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow!("ChatGPT account id is missing"))?;
-
+async fn fetch_usage(account: &AccountLease) -> Result<Value> {
     let response = reqwest::Client::new()
         .get(CHATGPT_USAGE_URL)
-        .bearer_auth(tokens.access_token)
-        .header("ChatGPT-Account-ID", account_id)
+        .bearer_auth(&account.access_token)
+        .header("ChatGPT-Account-ID", &account.account_id)
         .header(reqwest::header::USER_AGENT, CODEX_USER_AGENT)
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
@@ -99,6 +114,18 @@ async fn fetch_usage(config: &Config) -> Result<Value> {
     }
     let raw: Value = serde_json::from_slice(&body).context("invalid OpenAI usage JSON")?;
     normalize_usage(&raw)
+}
+
+pub fn subscription_exhausted(value: &Value) -> bool {
+    let rate_limit = value.get("rate_limit");
+    rate_limit
+        .and_then(|rate| rate.get("limit_reached"))
+        .and_then(Value::as_bool)
+        == Some(true)
+        || rate_limit
+            .and_then(|rate| rate.get("allowed"))
+            .and_then(Value::as_bool)
+            == Some(false)
 }
 
 fn normalized_window(value: Option<&Value>) -> Value {
@@ -301,5 +328,19 @@ mod tests {
         let value = normalize_usage(&json!({})).unwrap();
         assert!(value["rate_limit"]["primary_window"]["used_percent"].is_null());
         assert!(value["credits"]["unlimited"].is_null());
+    }
+
+    #[test]
+    fn exhaustion_requires_an_explicit_negative_allowance_signal() {
+        assert!(subscription_exhausted(&json!({
+            "rate_limit": {"allowed": false, "limit_reached": false}
+        })));
+        assert!(subscription_exhausted(&json!({
+            "rate_limit": {"allowed": true, "limit_reached": true}
+        })));
+        assert!(!subscription_exhausted(&json!({
+            "rate_limit": {"allowed": true, "limit_reached": false}
+        })));
+        assert!(!subscription_exhausted(&json!({})));
     }
 }

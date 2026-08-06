@@ -3,7 +3,7 @@
 # Runtime binary is renamed to a neutral name so the process doesn't advertise its purpose.
 FROM rust:1-bookworm AS builder
 ENV CARGO_TERM_COLOR=always
-ENV CARGO_BUILD_JOBS=1
+ENV CARGO_BUILD_JOBS=4
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev ca-certificates cmake perl build-essential \
     && rm -rf /var/lib/apt/lists/*

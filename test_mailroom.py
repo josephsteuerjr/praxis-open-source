@@ -213,7 +213,10 @@ class TestAgentMailTools(Base):
         _, system, evidence = agent._build_prompt_parts(owner=True, is_dm=True, scope="owner")
         self.assertNotIn(h, system, "строки ящика не должны получать SYSTEM-authority")
         self.assertIn(h, evidence, "честный индекс ящика должен быть в lower-role контексте")
-        self.assertIn("Почтовый ящик", evidence)
+        # ⚠ Ярлык тира приезжает в кадр ЗАГОЛОВКОМ секции — капсом, между правилами
+        # `────`. Литерал ярлыка в кадре больше не встречается, и это не пропажа:
+        # заголовок виден сильнее прежней JSON-строки.
+        self.assertIn("ПОЧТОВЫЙ ЯЩИК", evidence)
 
     def test_autonomous_context_can_suppress_full_mailbox_index(self):
         h = self._one()
@@ -252,7 +255,7 @@ class TestAgentMailTools(Base):
                      {"owner": False, "is_dm": True, "scope": "known"}):
             _, system, evidence = agent._build_prompt_parts(**room)
             self.assertNotIn(h, system, f"ящик не получает SYSTEM-authority: {room}")
-            self.assertIn("Почтовый ящик", evidence,
+            self.assertIn("ПОЧТОВЫЙ ЯЩИК", evidence,
                           f"договор от 03.08: ящик виден в любой комнате — {room}")
 
     def test_frame_block_present_when_open(self):

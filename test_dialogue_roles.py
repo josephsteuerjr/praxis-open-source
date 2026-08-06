@@ -197,7 +197,9 @@ class TheModelSeesRolesAndTheReceiptsSeeEverything(unittest.TestCase):
         text = tail if isinstance(tail, str) else "".join(
             str(b.get("text", "")) for b in tail if isinstance(b, dict))
         self.assertIn("Егор: что с почтой", text)
-        self.assertIn("<current_user_message>", text)
+        # Тег реплики ПОДПИСАН (author/tg/message из транспортных полей). Здесь предмет
+        # другой: что реплика вообще открывается своим тегом, а не тонет в конверте.
+        self.assertIn("<current_user_message", text)
         self.assertNotIn("привет, я тут", text,
                          "её реплика приехала И ролью, И текстом — это дубль")
 

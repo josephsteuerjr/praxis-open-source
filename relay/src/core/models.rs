@@ -442,11 +442,26 @@ pub struct Choice {
     pub finish_reason: String,
 }
 
+/// Cached prefix accounting, OpenAI-compatible shape.
+///
+/// 02.08.2026. Кэш на этом пути АВТОМАТИЧЕСКИЙ: провайдер сам кэширует совпадающий
+/// префикс, его нельзя «включить» — его зарабатывают стабильностью байтов. Отчитывается
+/// он единственным способом, вот этим полем. Реле схлопывало usage до
+/// `{prompt_tokens, completion_tokens, total_tokens}` и деталь теряло — поэтому у Praxis
+/// в учёте стояли нули по всем ходам через gpt, и это читалось как «кэш не работает».
+/// На самом деле это означало «не сообщено»: отличить одно от другого было нечем.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptTokensDetails {
+    pub cached_tokens: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

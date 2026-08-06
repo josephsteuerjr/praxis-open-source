@@ -177,14 +177,41 @@ class TestReadingOnePlace(Base):
             if body and not body.startswith("["):
                 self.assertIn(body, new, body[:40])
 
-    def test_an_empty_registry_reads_exactly_as_before(self):
+    def test_an_empty_registry_reads_the_whole_room_not_a_branch(self):
+        """Молчание реестра — «мы не спрашивали», а не «здесь ветки». Решение Егора 06.08.
+
+        ⚠ ЭТОТ ТЕСТ НАЗЫВАЛСЯ `..._reads_exactly_as_before` и держал ОБРАТНУЮ политику:
+        пока про комнату ничего не доказано, лента сжималась до ветки. Замер 06.08 показал
+        цену осторожности: 446 буферов, из них 424 — ветки, при двух настоящих форумах на
+        все её места. Она просыпалась в куске разговора и не видела комнаты, из которой
+        кусок вырезан.
+
+        Цена ошибки несимметрична, и тест держит именно это: ошибиться в сторону комнаты —
+        показать ей соседние сообщения того же чата, то есть ровно то, что видит человек;
+        ошибиться в сторону ветки — показать обрывок и назвать его разговором.
+        """
         peer = self._forum_room()
         scope = tr.read_scope(peer, 100)
-        old = group_context.context(peer, topic_id=100, limit=200, max_chars=40000)
-        new = group_context.context(peer, topic_id=100, limit=200, max_chars=40000,
-                                    whole_room=scope.whole_room, members=scope.members,
-                                    thread_word=scope.thread_word)
-        self.assertEqual(old, new)
+        self.assertTrue(scope.whole_room, "пустой реестр снова режет ленту до ветки")
+        branch = group_context.context(peer, topic_id=100, limit=200, max_chars=40000)
+        room = group_context.context(peer, topic_id=100, limit=200, max_chars=40000,
+                                     whole_room=scope.whole_room, members=scope.members,
+                                     thread_word=scope.thread_word)
+        # Строгое добавление: ни одна строка ветки не пропала, и комната шире неё.
+        for line in branch.splitlines():
+            body = line.split("] ", 1)[-1].strip()
+            if body and not body.startswith("["):
+                self.assertIn(body, room, body[:40])
+        self.assertGreater(len(room), len(branch),
+                           "комната не шире ветки — расширение не состоялось")
+
+    def test_a_proven_forum_still_keeps_its_topics_apart(self):
+        """Перевёрнутое умолчание НЕ трогает настоящий форум: его границы провёл Telegram."""
+        peer = self._forum_room()
+        tr.observe(peer, kind="entity_forum_flag", forum=True, message_id=1)
+        scope = tr.read_scope(peer, 100)
+        self.assertFalse(scope.whole_room,
+                         "прямое forum=true перестало разделять темы — это уже не место")
 
 
 if __name__ == "__main__":

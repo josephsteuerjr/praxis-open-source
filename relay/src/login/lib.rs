@@ -5,13 +5,13 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::env;
 use std::fs::File;
-use std::fs::OpenOptions;
+use std::fs;
 use std::fs::remove_file;
 use std::io::Read;
 use std::io::Write;
 use std::io::{self};
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
@@ -406,16 +406,22 @@ pub fn try_read_auth_json(auth_file: &Path) -> std::io::Result<AuthDotJson> {
 
 fn write_auth_json(auth_file: &Path, auth_dot_json: &AuthDotJson) -> std::io::Result<()> {
     let json_data = serde_json::to_string_pretty(auth_dot_json)?;
-    let mut options = OpenOptions::new();
-    options.truncate(true).write(true).create(true);
+    let parent = auth_file
+        .parent()
+        .ok_or_else(|| std::io::Error::other("auth file has no parent directory"))?;
+    fs::create_dir_all(parent)?;
+    let mut temp = NamedTempFile::new_in(parent)?;
     #[cfg(unix)]
     {
-        options.mode(0o600);
+        temp.as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
     }
-    let mut file = options.open(auth_file)?;
-    file.write_all(json_data.as_bytes())?;
-    file.flush()?;
-    Ok(())
+    temp.as_file_mut().write_all(json_data.as_bytes())?;
+    temp.as_file_mut().flush()?;
+    temp.as_file_mut().sync_all()?;
+    temp.persist(auth_file)
+        .map(|_| ())
+        .map_err(|error| error.error)
 }
 
 async fn update_tokens(

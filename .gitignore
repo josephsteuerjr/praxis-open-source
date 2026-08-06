@@ -10,6 +10,11 @@ memory/people/*
 memory/journal/*
 memory/rooms/*
 memory/dialogues/*
+# Синтетические образцы формата — единственное исключение: настоящей памяти в них
+# нет, а без примера читатель не может понять, ЧТО именно закрыто (см. TEMPLATES.md).
+!memory/people/*.example.md
+!memory/rooms/*.example.md
+!memory/journal/*.example.md
 !memory/people/_пример.md
 memory/INDEX.md
 memory/.vectors/

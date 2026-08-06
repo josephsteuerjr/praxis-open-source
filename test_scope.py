@@ -244,8 +244,10 @@ class TestBuildSystemPartsScope(unittest.TestCase):
         _, dyn, evidence = agent._build_prompt_parts(
             speaker="ZZ Participant Internal (@zz)", query="медицинский", ctx=ctx,
         )
-        self.assertNotIn("Карта памяти — ВНУТРЕННЯЯ", dyn)
-        self.assertIn("Карта памяти — ВНУТРЕННЯЯ", evidence)
+        # Ярлык приезжает ЗАГОЛОВКОМ секции, капсом: свойство то же — карта живёт
+        # в evidence и не является системной властью, — но форма другая.
+        self.assertNotIn("КАРТА ПАМЯТИ — ВНУТРЕННЯЯ", dyn)
+        self.assertIn("КАРТА ПАМЯТИ — ВНУТРЕННЯЯ", evidence)
         self.assertNotIn("личный медицинский факт", dyn)
         self.assertNotIn("личный медицинский факт", evidence)
         self.assertNotIn("Новый Человек (@newbie) | пока нет устойчивого досье", dyn)

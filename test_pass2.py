@@ -203,7 +203,10 @@ class TestCompact(Base):
         _persona, dynamic, evidence = agent._build_prompt_parts(
             speaker=None, chat_id="777")
         self.assertNotIn("СВОДКА-МАРКЕР", dynamic)
-        self.assertIn("Ранее в этом диалоге (сводка)", evidence)
+        # ⚠ Ярлык тира приезжает в кадр ЗАГОЛОВКОМ секции — капсом, между правилами
+        # `────`. Литерал ярлыка в кадре больше не встречается, и это не пропажа:
+        # заголовок виден сильнее прежней JSON-строки.
+        self.assertIn("РАНЕЕ В ЭТОМ ДИАЛОГЕ", evidence)
         self.assertIn("СВОДКА-МАРКЕР", evidence)
 
     def test_compact_empty_lines_noop(self):

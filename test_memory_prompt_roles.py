@@ -43,16 +43,28 @@ class MemoryPromptRoleTests(unittest.TestCase):
                     "SPEAKER_SYSTEM_OVERRIDE", query="hello", ctx=ctx,
                 )
 
+            # ⚠ 06.08: ИМЯ СОБЕСЕДНИКА И НАЗВАНИЕ КОМНАТЫ УШЛИ ИЗ evidence В ЗОНУ
+            # «СЕЙЧАС». Прежде их вёз тир «Current Telegram labels» — за девяносто тысяч
+            # знаков до реплики, между чужими эпизодами памяти. Свойство, ради которого
+            # тест писался, не ослабло, а разделилось: в системной власти их по-прежнему
+            # нет, а видимость проверяется там, где они теперь стоят.
             for marker in (
                 "HOME_SYSTEM_OVERRIDE", "COMPACT_SYSTEM_OVERRIDE", "CLAIM_CONTEXT",
                 "MAIL_SYSTEM_OVERRIDE", "RECALL_SYSTEM_OVERRIDE",
-                "SPEAKER_SYSTEM_OVERRIDE", "TITLE_SYSTEM_OVERRIDE",
                 "DESIRE_SYSTEM_OVERRIDE", "STATE_PROSE_SYSTEM_OVERRIDE",
             ):
                 with self.subTest(marker=marker):
                     self.assertNotIn(marker, system)
                     self.assertNotIn(marker, public_system)
                     self.assertIn(marker, evidence)
+
+            zone = agent.frame_layout.situation(ctx, speaker="SPEAKER_SYSTEM_OVERRIDE")
+            for marker in ("SPEAKER_SYSTEM_OVERRIDE", "TITLE_SYSTEM_OVERRIDE"):
+                with self.subTest(marker=marker, where="zone"):
+                    self.assertNotIn(marker, system)
+                    self.assertNotIn(marker, public_system)
+                    self.assertNotIn(marker, evidence)
+                    self.assertIn(marker, zone)
 
             # ⚠ 06.08.2026: дайджест ЧУЖИХ КОМНАТ ушёл из списка выше не потому, что
             # свойство «изменчивая проза не бывает системной властью» для него ослабло, а
@@ -223,7 +235,11 @@ class MemoryPromptRoleTests(unittest.TestCase):
         wrapped = agent._with_context_evidence("actual request", '{"content":"memory cue"}\n')
         self.assertIn("praxis_context_evidence", wrapped)
         self.assertIn("memory cue", wrapped)
-        self.assertIn("<current_user_message>\nactual request", wrapped)
+        # ⚠ Реплика человека едет ПОД ГУТТЕРОМ — она такой же недоверенный текст, как тело
+        # находки. Дословность байтов цела, меняется колонка; цена принята Праксис 06.08.
+        # Тег при этом ПОДПИСАН, когда транспортные поля известны, поэтому здесь префикс.
+        self.assertIn("<current_user_message", wrapped)
+        self.assertIn("\n> actual request", wrapped)
     def test_blind_identity_load_is_omitted_from_prompt_layers(self) -> None:
         load_marker = "LOAD_MARKER_8_36"
         revision_marker = "REVISION_MARKER"
