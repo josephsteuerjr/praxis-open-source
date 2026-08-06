@@ -409,6 +409,38 @@ def record_message(chat_id: str | int, line: str, *, actor: str = "", direction:
         return rec
 
 
+def hot_records(chat_id: str | int, limit: int | None = None) -> list[dict]:
+    """Горячий слой КАК ЗАПИСИ, а не как склейка строк.
+
+    Буфер раннера (`_buf`) — строковое зеркало этого же слоя, и по нему авторство уже
+    не восстановить: «Praxis: …» и «Егор: …» отличаются только префиксом, многострочное
+    сообщение неотличимо от двух подряд, а процитированная чужая реплика выглядит как
+    настоящая. Здесь автор и направление лежат ПОЛЯМИ, потому что их записали в момент
+    события, — и поэтому отсюда можно построить разговор с ролями, ничего не угадывая.
+
+    Записи, заведённые до появления полей (legacy bootstrap), не теряются: направление
+    для них выводится из имени актора, и это единственное место, где догадка допустима.
+    """
+    rows: list[dict] = []
+    for item in (_load_state(chat_id).get("hot") or []):
+        if not isinstance(item, dict):
+            continue
+        line = str(item.get("line") or "")
+        if not line.strip():
+            continue
+        actor = str(item.get("actor") or line.split(":", 1)[0] or "").strip()
+        direction = str(item.get("direction") or "").strip()
+        if direction not in ("in", "out"):
+            direction = "out" if actor.casefold() == "praxis" else "in"
+        rows.append({
+            "actor": actor, "direction": direction, "line": line,
+            "ts": _epoch(item.get("ts")), "source_id": item.get("source_id"),
+        })
+    if limit is not None and limit > 0:
+        return rows[-limit:]
+    return rows
+
+
 def _legacy_summary(chat_id: str | int) -> str:
     safe = _safe(chat_id)
     for p in (LEGACY_SUMMARIES_DIR / f"{safe}.md", DIALOGUES_DIR / f"{safe}.md"):

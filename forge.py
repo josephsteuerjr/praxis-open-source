@@ -970,6 +970,12 @@ def reconcile_subagent_events(force: bool = False) -> int:
         reconcile_lost_tasks()
     except Exception:
         log.debug("reconcile_lost_tasks упал", exc_info=True)
+    # Четвёртый класс, и снова свой счёт: СДАННАЯ задача не знает судьбы своего
+    # предложения. Жнец брошенных сюда не доходит — он обходит только `active`.
+    try:
+        reconcile_submitted_tasks()
+    except Exception:
+        log.debug("reconcile_submitted_tasks упал", exc_info=True)
     # И третий класс на том же тике: чужой репозиторий — не юнит и не задача, у него
     # свой редкий такт (см. check_upstreams). Отдельный try по той же причине: слепота
     # к чужому HEAD не имеет права ослепить контур собственных субагентов.
@@ -983,6 +989,119 @@ def reconcile_subagent_events(force: bool = False) -> int:
 # Сколько тишины делает задачу «потерянной из виду». Не уборка и не срок жизни:
 # по истечении она НЕ закрывается и ничего не отменяется — она БУДИТ.
 TASK_ABANDONED_SEC = _env_sec("PRAXIS_FORGE_TASK_ABANDONED_H", 6.0, scale=3600.0)
+
+
+def _last_trace_line(task_id: str, limit: int = 3) -> str:
+    """Что по задаче наблюдаемо СДЕЛАНО — прежде чем звать её продолжать.
+
+    ⚠ 01.08: `hcode-d8799ba2` («проверить свежие fail2ban-баны и разбанить по прямой
+    просьбе Егора») получила ярлык «потеряна из виду» через шесть часов — а в её журнале
+    три успешные хост-команды, последняя `Unbanning 198.51.100.7 …`. Работа была
+    сделана. Текст пробуждения говорил только о тишине, поэтому, вернувшись, она узнала
+    бы про порог молчания и ничего — про уже сделанное. Это ровно шов «артефакт ≠
+    доставка ≠ статус»: работу либо переделывают, либо бросают как несделанную.
+
+    Служебные отметки самой петли (старт, потеря, возврат) отсеиваются: они говорят о
+    жизни ярлыка, а не о работе.
+    """
+    rows = _events(task_id, limit=40)
+    keep = [row for row in rows if str(row.get("kind") or "")
+            not in ("task_lost", "task_started", "task_reopened")]
+    if not keep:
+        return ""
+    bits = []
+    for row in keep[-max(1, int(limit)):]:
+        kind = str(row.get("kind") or "?")
+        text = " ".join(str(row.get("summary") or row.get("result") or "").split())
+        bits.append(f"{kind}: {text[:110]}" if text else kind)
+    return "Последнее наблюдаемое в журнале задачи — " + "; ".join(bits) + "."
+
+
+def _root_state_line(task: dict) -> str:
+    """Цел ли корень задачи. «Продолжить тем же id» стоит разной цены, когда рабочее
+    дерево на месте и когда его снесли, — и знать это надо ДО того, как продолжать."""
+    root_raw = str(task.get("root") or "").strip()
+    if not root_raw:
+        return "Корень не записан."
+    try:
+        alive = Path(root_raw).is_dir()
+    except OSError:
+        alive = False
+    if alive:
+        return f"Корень {root_raw} на месте."
+    return (f"⚠ Корня {root_raw} на диске БОЛЬШЕ НЕТ: рабочее дерево не сохранилось, "
+            f"продолжение по этому id начнётся с пустого места.")
+
+
+def reconcile_submitted_tasks() -> int:
+    """Сданная задача узнаёт судьбу своего предложения. -> сколько закрыто.
+
+    ⚠ 01.08. `code-32d32e70` восемь суток числилась `submitted`, а её предложение
+    `de64316c` Егор смёржил через двадцать минут после сдачи. Никто этого не заметил:
+    жнец брошенных обходит только `active`, а `state_line()` считает `submitted`
+    активной работой — то есть её блок состояния восемь суток сообщал ей о кодинг-задаче,
+    которой давно нет, и на её же вопрос «что у меня в работе» отвечал неправдой.
+
+    Это тот же класс, что её «подготовлено вспоминается как доставлено», только с другой
+    стороны: сделанное и ПРИНЯТОЕ помнится как висящее. Лечение то же самое — статус
+    выводится из наблюдаемого реестра, а не из момента передачи из рук в руки.
+
+    Пробуждения здесь НЕТ намеренно. Жнец брошенных будит, потому что её намерение могло
+    пропасть молча; тут пропасть нечему — про мёрж и про отказ `selfdev` уже написал ей в
+    дневник в тот же момент. Догоняющая бухгалтерия не повод отнимать у неё ход.
+
+    Пока решения по предложению нет — не трогаем ничего: `submitted` тогда правда.
+    """
+    if not TASKS_DIR.is_dir():
+        return 0
+    settled = 0
+    for path in TASKS_DIR.glob("*/task.json"):
+        try:
+            task = _read_json(path)
+            if not isinstance(task, dict) or str(task.get("status") or "") != "submitted":
+                continue
+            task_id = str(task.get("id") or path.parent.name)
+            proposal_id = str(task.get("proposal_id") or "").strip()
+            if not proposal_id:
+                continue
+            proposal = selfdev.get(proposal_id)
+            if not isinstance(proposal, dict):
+                # Реестр не знает предложения. Хоронить задачу по ОТСУТСТВИЮ записи
+                # нельзя — это доказательство слабее, чем вердикт. Оставляем статус и
+                # один раз записываем саму слепоту, чтобы она была видима, а не тиха.
+                if not task.get("submission_unknown_since"):
+                    task["submission_unknown_since"] = _now()
+                    _save_task(task)
+                    _event(task_id, "task_submission_unknown", proposal=proposal_id,
+                           summary=f"предложения {proposal_id} нет в реестре — "
+                                   f"судьбу сдачи подтвердить нечем, статус не трогаю")
+                continue
+            verdict = str(proposal.get("status") or "")
+            if verdict not in ("merged", "rejected"):
+                continue
+            decided_by = str(proposal.get("decided_by") or "").strip()
+            who = f" ({decided_by})" if decided_by else ""
+            if verdict == "merged":
+                result = (f"Предложение {proposal_id} смёржено{who} — работа задачи "
+                          f"лежит в дереве.")
+            else:
+                reason = str(proposal.get("reason") or "").strip()
+                result = (f"Предложение {proposal_id} отклонено{who}"
+                          + (f": {reason[:200]}" if reason else "")
+                          + " — работа задачи в дерево не легла.")
+            task["status"] = "done"
+            task["finished"] = _now()
+            task["submission_status"] = verdict
+            task["submission_result"] = result
+            _save_task(task)
+            _event(task_id, "task_submission_settled", proposal=proposal_id,
+                   proposal_status=verdict, summary=result)
+            settled += 1
+            log.info("forge: сданная задача %s закрыта по вердикту предложения %s (%s)",
+                     task_id, proposal_id, verdict)
+        except Exception:
+            log.debug("сверка сдачи: задача %s пропущена", path, exc_info=True)
+    return settled
 
 
 def _task_last_trace(task_id: str, task: dict) -> float:
@@ -1057,10 +1176,12 @@ def reconcile_lost_tasks() -> int:
                             f" ⚠ scope={scope}: удалённые операции отсюда не видны — если на "
                             "той стороне что-то ещё крутится, спроси coding_process(list), "
                             "прежде чем считать задачу мёртвой.")
+            trace_line = _last_trace_line(task_id)
             recap = (
                 f"Задача открыта {task.get('created')} и {quiet_for / 3600:.1f}ч не подаёт "
                 f"признаков: ни живых процессов, ни новых событий. Цель: "
-                f"«{str(task.get('goal') or '')[:200]}». Корень: {task.get('root')}. "
+                f"«{str(task.get('goal') or '')[:200]}». {_root_state_line(task)} "
+                + (trace_line + " " if trace_line else "") +
                 f"Я ничего не закрыла и не отменила — статус lost это ярлык «потеряна из "
                 f"виду» по порогу тишины {TASK_ABANDONED_SEC / 3600:.0f}ч, не приговор. "
                 f"Продолжить — теми же тулами по тому же id (первое действие вернёт "

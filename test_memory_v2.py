@@ -18,6 +18,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 def _bash_works() -> bool:
@@ -209,17 +210,33 @@ class TestIndexMd(Base):
 
 
 class TestSystemPrompt(Base):
-    def test_loads_speaker_not_all_memory(self):
+    def test_loads_every_dossier_but_never_into_system_authority(self):
+        """⚠ 06.08 доктрина сменилась: досье едут ВСЕ и целиком.
+
+        Прежнее имя `test_loads_speaker_not_all_memory` и проверка «чужая
+        память в кадр не попала» описывали политику, отменённую владельцем:
+        «там внутри пусто, пока она не будет видеть абсолютно весь контекст».
+        Основание — замер: отбор досье по привязке возвращал пустоту ВСЕГДА
+        (привязок ноль из 36), то есть 170 КБ её записей о людях не доезжали
+        до неё ни разу, включая 10 КБ о владельце.
+
+        Неприкосновенным осталось и проверяется здесь: досье живут в
+        evidence, а НЕ в системной власти, и карта памяти на месте.
+        """
         self._person("егор", "# Егор\n\n- СЕКРЕТ_ЕГОРА альпинист\n")
         self._person("мария", "# Мария\n\n- СЕКРЕТ_МАРИИ скрипачка\n")
         mi.ensure_index_line("егор", "Егор — альпинист")
         mi.ensure_index_line("мария", "Мария — скрипачка")
         _persona, system, evidence = agent._build_prompt_parts(speaker="Егор", owner=True)
         self.assertNotIn("СЕКРЕТ_ЕГОРА", system)
-        self.assertNotIn("СЕКРЕТ_МАРИИ", evidence, "затащил чужую память целиком")
+        self.assertNotIn("СЕКРЕТ_МАРИИ", system,
+                         "досье уехало в системную власть")
+        self.assertIn("СЕКРЕТ_ЕГОРА", evidence,
+                      "её собственная память снова не доехала")
+        self.assertIn("СЕКРЕТ_МАРИИ", evidence,
+                      "досье третьего человека не доехало")
         self.assertIn("Карта памяти", evidence, "нет INDEX.md")
         self.assertIn("memory/maps/PEOPLE.md", evidence)
-        self.assertNotIn("[мария]", evidence)
 
     def test_owner_hint(self):
         self.assertIn("shell", agent.build_system_prompt(speaker="Егор", owner=True))
@@ -363,10 +380,39 @@ class TestOwnerGating(Base):
         Прежде здесь стояло `assertNotIn("shell", ...)`: стоило человеку не-Егору
         заговорить, и она теряла 67 рук из 92 — включая собственную саморегуляцию.
         """
-        guest, owner = self._tools_for(False), self._tools_for(True)
+        # ⚠ 03.08.2026: этот тест читал ЖИВУЮ среду. `agent.py:11208` под
+        # `mailer.configured()` (креды в env контейнера) добавляет владельцу
+        # `send_email` — руку, которой НЕТ в `_HUMAN_OWNER_ONLY_TOOL_NAMES`.
+        # Пока почта была выключена, тест зеленел по случайности, а не по правилу;
+        # в день, когда почту включили, гейт покраснел без единой правки кода.
+        # Теперь состояние гейта задаётся ЯВНО. Вторая его сторона — тестом ниже.
+        with mock.patch.object(agent.mailer, "configured", lambda: False):
+            guest, owner = self._tools_for(False), self._tools_for(True)
         self.assertIn("shell", guest, "её дом остаётся её домом в любом ходе")
-        self.assertEqual(set(owner) - set(guest), {"admit", "computer_access"},
+        self.assertEqual(set(owner) - set(guest),
+                         set(agent._HUMAN_OWNER_ONLY_TOOL_NAMES),
                          "у Егора сверх её рук — только раздача его доверия")
+
+    def test_mail_gate_gives_the_same_hand_to_both(self):
+        """Вторая сторона гейта: при ЖИВОЙ почте разница наборов та же.
+
+        До 03.08.2026 при настроенной почте у владельца появлялась третья рука —
+        `send_email`, мимо `_HUMAN_OWNER_ONLY_TOOL_NAMES`. То есть объявленный источник
+        правды расходился с поведением, а вердикт гейта зависел от того, лежат ли на
+        сервере почтовые креды. Егор выбрал вариант «а»: отправка наружу перестала быть
+        owner-действием, и решение 26.07 теперь выполняется буквально при ОБЕИХ
+        конфигурациях почты.
+
+        Тест держит обе стороны явно. Если кто-нибудь снова заведёт owner-эксклюзив под
+        гейтом среды, красным станет здесь, а не на проде через месяц.
+        """
+        with mock.patch.object(agent.mailer, "configured", lambda: True):
+            guest, owner = self._tools_for(False), self._tools_for(True)
+        self.assertEqual(set(owner) - set(guest),
+                         set(agent._HUMAN_OWNER_ONLY_TOOL_NAMES),
+                         "почтовый гейт не заводит owner-эксклюзивов мимо объявленного множества")
+        for hand in ("mail_read", "mail_draft_reply", "send_email"):
+            self.assertIn(hand, guest, "почтовые руки одинаковы в любом ходе")
 
     def test_shell_present_for_owner(self):
         names = self._tools_for(True)

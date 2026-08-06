@@ -33,9 +33,9 @@ commit прошёл gate и как откатываться, фиксирует 
   topic. Сырые сообщения архивируются с exact peer/topic/message provenance.
 - Прямые Telegram-отправки и расписание сначала записывают durable intent, затем касаются сети;
   повтор использует тот же MTProto `random_id`.
-- Входящие для владельца имеют общий append-only ledger `owner_delivery.py`, который одинаково
-  проецируется в Telegram и Praxis App. Непрочитанное и прочитанное, но ещё не обработанное не
-  исчезает из-за мягкого history budget интерфейса.
+- Входящие для владельца имеют append-only ledger `owner_delivery.py`; действующая проекция —
+  Telegram. Непрочитанное и прочитанное, но ещё не обработанное не исчезает из-за мягкого history
+  budget интерфейса.
 - Один Forge хранит инженерные задачи в `memory/.forge/`. Серверный root-broker и Windows Body
   получают только typed execution envelope и возвращают evidence.
 - Praxis herself is the sovereign actor `praxis:self`: ей доступны документы, код, server/root,
@@ -51,17 +51,8 @@ commit прошёл gate и как откатываться, фиксирует 
   exact-подтверждения новым сообщением owner DM. `requested_by` и `confirmed_by` остаются разными
   полями; параметры живут до TTL в зашифрованном spool, а JSONL и durable run evidence хранят только
   redacted schema marker, digest и opaque reference.
-- `/app` — устанавливаемая owner PWA над тем же server runtime, а не второй агент. Telegram
-  авторизуется подписанным initData, отдельное устройство — owner-issued одноразовой ссылкой и
-  device-scoped bearer. Service worker хранит только shell; последний проверенный snapshot и
-  черновики разделены по principal/device, а offline-мутации никогда не воспроизводятся сами.
-- Командные мутации Praxis App и Windows side effects требуют стабильный idempotency key.
-  Серверная операция получает durable claim/receipt, а Windows side effect — детерминированные
-  `request_id` и `operation_id`, которые сохраняются при ручном retry того же намерения. Прямое
-  изменение access имеет идемпотентное effective state, но повтор после потерянного ответа может
-  добавить второй audit event. Enrollment-секрет намеренно никогда не сохраняется и не может быть
-  воспроизведён: потерянный ответ оставляет только истекающую orphan-ссылку, после чего owner может
-  выпустить новую.
+- Windows side effects требуют стабильный idempotency key. Детерминированные `request_id` и
+  `operation_id` сохраняются при ручном retry того же намерения.
 
 ## Первый запуск для разработки
 
@@ -115,9 +106,9 @@ FTS и индекс наблюдений Windows): таблицы создают
 создают внешнюю БД. Не удаляйте всю `memory/.state/` как «кэш»: рядом с производными SQLite там
 живут outbox и durable ledgers, которые должны попадать в backup.
 
-`mailroom_bot.py` читает секрет `PRAXIS_MAIL_BOT_TOKEN` из private `.deploy.env`. Публичный
-`PRAXIS_APP_URL` и стандартный PWA file-transfer cap настраиваются в `.env`; по умолчанию браузерный
-import/export ограничен 64 MiB в каждую сторону и всё равно проверяет имя, размер и SHA-256.
+`mailroom_bot.py` читает секрет `PRAXIS_MAIL_BOT_TOKEN` из private `.deploy.env` и работает
+headless: поллит IMAP, обновляет `memory/mailbox.json`, присылает новые письма и карточки изменений.
+Он не открывает HTTP-порт и не публикует Mini App/PWA.
 
 Полезные обслуживающие команды:
 

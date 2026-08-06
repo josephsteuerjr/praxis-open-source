@@ -51,7 +51,16 @@ class ParticipantPrincipalBindingTests(unittest.TestCase):
         self._dossier("mallory", "Mallory", "101")
         self.assertEqual(people.slug_for_principal("101"), "")
 
-    def test_spoofed_display_name_cannot_select_another_dossier(self) -> None:
+    # ⚠ 06.08 ДОКТРИНА СМЕНИЛАСЬ, И ЭТИ ТРИ ПРОВЕРКИ ПЕРЕПИСАНЫ, А НЕ ОСЛАБЛЕНЫ.
+    # Досье больше не ОТБИРАЮТСЯ: все 35 лежат в кадре целиком (замер показал, что
+    # привязок ноль из 36, то есть прежний отбор возвращал пустоту ВСЕГДА — даже
+    # владельцу). Прежние проверки описывали механизм, которого больше нет: «при
+    # подделке имени блок ПУСТ». Свойство, ради которого они писались, стало сильнее:
+    # состав блока вообще НЕ ЗАВИСИТ от того, кем назвался говорящий, а строка
+    # «передо мной» берётся из привязки по tg и только из неё.
+
+    def test_spoofed_display_name_cannot_claim_an_identity(self) -> None:
+        """Имя из сообщения не назначает личность и не меняет состав кадра."""
         self._dossier("alice", "Alice", "101")
         self._dossier("victim", "Victim", "202")
 
@@ -59,23 +68,21 @@ class ParticipantPrincipalBindingTests(unittest.TestCase):
             chat_id="dm-999", principal_id="999", is_dm=True,
             owner=True, known=True,
         )
-        with mock.patch.object(people, "compact_profile", return_value="SHOULD_NOT_LOAD") as card:
-            self.assertEqual(
-                agent._participant_memory_block("Victim (@victim)", unbound),
-                "",
-            )
-            card.assert_not_called()
+        spoofed = agent._participant_memory_block("Victim (@victim)", unbound)
+        neutral = agent._participant_memory_block("кто угодно", unbound)
+        self.assertEqual(spoofed, neutral, "имя изменило состав кадра")
+        self.assertIn("НЕ НАЗВАН", spoofed, "кадр не сказал, что личность не подтверждена")
+        self.assertNotIn("передо мной: victim", spoofed)
+        self.assertNotIn("передо мной: alice", spoofed)
 
         authenticated = agent.ChannelContext(
             chat_id="dm-101", principal_id="101", is_dm=True,
             owner=False, known=True,
         )
-        with mock.patch.object(
-            people, "compact_profile", side_effect=lambda slug, **_kw: f"CARD:{slug}",
-        ) as card:
-            block = agent._participant_memory_block("Victim (@victim)", authenticated)
-        self.assertEqual(block, "- CARD:alice")
-        card.assert_called_once_with("alice", include_private=True)
+        block = agent._participant_memory_block("Victim (@victim)", authenticated)
+        self.assertIn("передо мной: alice", block,
+                      "личность взята из имени, а не из подтверждённого принципала")
+        self.assertNotIn("передо мной: victim", block)
 
     def test_alias_collision_cannot_redirect_exact_principal(self) -> None:
         self._dossier("alice", "Alice", "101", alias="Shared, @same")
@@ -84,13 +91,10 @@ class ParticipantPrincipalBindingTests(unittest.TestCase):
             chat_id="group", principal_id="202", is_dm=False,
             owner=False, known=True,
         )
-        with mock.patch.object(
-            people, "compact_profile", side_effect=lambda slug, **_kw: f"CARD:{slug}",
-        ):
-            self.assertEqual(
-                agent._participant_memory_block("Shared (@same)", ctx),
-                "- CARD:bob",
-            )
+        block = agent._participant_memory_block("Shared (@same)", ctx)
+        self.assertIn("передо мной: bob", block,
+                      "привязка по принципалу перестала решать, кто перед ней")
+        self.assertNotIn("передо мной: alice", block, "псевдоним перенаправил личность")
 
     def test_alias_never_associates_a_canonical_claim(self) -> None:
         self._dossier("alice", "Alice", "101", alias="Shared")
@@ -129,12 +133,15 @@ class ParticipantPrincipalBindingTests(unittest.TestCase):
         self.assertIn("BOB_CLAIM", card)
         self.assertNotIn("ALIAS_CLAIM", card)
 
-    def test_malformed_principal_never_selects_a_dossier(self) -> None:
+    def test_malformed_principal_never_claims_an_identity(self) -> None:
         self._dossier("alice", "Alice", "101")
         for value in (None, "", "Alice", "0", "-101", "101.0"):
             with self.subTest(value=value):
                 ctx = agent.ChannelContext(principal_id=value, is_dm=True, known=True)
-                self.assertEqual(agent._participant_memory_block("Alice", ctx), "")
+                block = agent._participant_memory_block("Alice", ctx)
+                self.assertNotIn("передо мной: ", block,
+                                 "кривой принципал назначил личность")
+                self.assertIn("не назван", block.lower())
 
 
 if __name__ == "__main__":

@@ -355,3 +355,13 @@ def activate_if_testing() -> str | None:
 # `_sandbox` at all under a test runner is enough to both redirect and fence.
 if _started_by_test_runner():
     activate_if_testing()
+    # Журнал сети встаёт там же, где файловый забор, и по той же причине: голый
+    # `python -m unittest test_x` не проходит через praxis_test.py, а именно такими
+    # разовыми прогонами пользуются чаще всего. ФАЗА 1 — только запись, без отказов:
+    # поведение прогона не меняется ни на йоту.
+    try:
+        import _netwatch
+
+        _netwatch.install()
+    except Exception:  # наблюдение не имеет права ронять прогон
+        pass

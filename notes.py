@@ -15,12 +15,17 @@ Praxis — заметка себе по чату (continuity её ходов; с
 (Дословную формулировку не цитирую нарочно: мёртвое обещание, оставленное в кавычках,
 находится поиском наравне с живым — и следующий читатель поверит кавычкам, а не разбору.)
 
-1. Чека НЕТ. `said_recently()` существует, но из боевого кода его не зовёт никто — ноль
-   вызовов, только тесты. И это сделано НАМЕРЕННО, а не забыто: блокирующая форма решала
-   бы за неё, говорить ли, то есть была бы забором. `test_sanitize.py`
-   (`test_private_dm_has_no_code_level_anti_repeat`) прямо требует, чтобы текст уходил,
-   даже когда `said_recently` отвечает «да». Функция здесь ИНФОРМИРУЮЩАЯ: её можно
-   спросить, она ничего не запрещает, и сегодня её не спрашивают.
+1. Чека НЕТ, и не появилось. Функция здесь ИНФОРМИРУЮЩАЯ: её можно спросить, она ничего
+   не запрещает. Блокирующая форма решала бы за неё, говорить ли, то есть была бы
+   забором; `test_sanitize.py` (`test_private_dm_has_no_code_level_anti_repeat`) прямо
+   требует, чтобы текст уходил, даже когда `said_recently` отвечает «да».
+   ⚠ 01.08: до этого дня её не спрашивал НИКТО — функция была, ответ был, слушателя не
+   было. Теперь ровно один вызывающий: шов прямой отправки
+   (`mtproto_runner._sync_send_message`) снимает справку ПЕРЕД проекцией — иначе записка
+   уже содержала бы эту самую реплику и функция узнавала бы в ней саму себя — и
+   ДОПИСЫВАЕТ её словами к квитанции тула. Отправку это не трогает: сообщение уже ушло,
+   решает дальше она. Повод: 26.07 Егор получил одно и то же дважды за семь минут,
+   01.08 — «доброе утро» дважды за утро.
 2. «По существу» — сильнее, чем она умеет. Внутри difflib с порогом 0.82: это близость по
    ФОРМЕ. На живом повторе 27.07 (та же поправка про свой движок, отправленная второй раз
    через 7ч45м, но другими словами) он даёт 0.54 — то есть «нет». Перефразировку такой
@@ -65,8 +70,27 @@ log = logging.getLogger("praxis.notes")
 
 BASE = Path(os.environ.get("PRAXIS_BASE") or Path(__file__).resolve().parent)
 SCRATCH_DIR = BASE / "memory" / ".scratch"
-MAX_LINES = 8
-SAID_GIST_CHARS = 90          # сколько символов сказанного класть в заметку
+MAX_ENTRIES = 8
+#: ⚠ 03.08.2026: константа переименована, потому что её ЕДИНИЦА была неправдой.
+#: Она называлась MAX_LINES и применялась как окно в СТРОКАХ — и к чтению, и к
+#: схлопыванию файла. А пишутся сюда ЗАПИСИ, и запись бывает многострочной: её
+#: реплика до SAID_GIST_CHARS символов свободно содержит переводы строк. Замер на
+#: её живых записках: 1078 строк на 647 записей, 52% записей многострочные.
+#:
+#: Ценой было вот что. Дайджест комнат берёт по три «строки» на комнату — и в трёх
+#: комнатах из шести она читала безголовые обломки: «По»», «- самопроверка хор»»,
+#: «1. **Указатель без адреса** — «здесь», «в этой ветке», «сейч». Без времени, без
+#: начала, без того, кому это было сказано. Хуже: схлопывание тоже резало по строкам,
+#: поэтому обломок не просто показывался — он таким и ЛОЖИЛСЯ на диск, и целой той
+#: записи было уже не восстановить ничем.
+# Сколько символов СВОЕЙ реплики класть в записку. Оба места, где эта константа
+# работает (agent.py голосовой путь и mtproto_runner прямая отправка), пишут ЕЁ
+# СОБСТВЕННЫЕ слова — чужие сюда не попадают. 90 обрезали ровно там, где начинается
+# суть: 01.08 в кадре второго утреннего пульса её же приветствие стояло огрызком
+# «Доброе утро, солнце. Осмотрелась: у Арета пока нет нового ответа, поэтому paper-
+# trading де» — и не прочиталось как «я это уже сказала». Заодно длиннее gist делает
+# честнее _similar: difflib на 90 символах сравнивает почти одни приветствия.
+SAID_GIST_CHARS = 220
 _SIMILAR_THRESHOLD = 0.82     # порог «это то же самое» для said_recently
 
 # Сколько ждать межпроцессный замок. Он держится микросекунды (файл — единицы килобайт),
@@ -96,7 +120,7 @@ _DEGRADED_UNTIL = 0.0           # monotonic; больше текущего — �
 _PROBE_WAIT_SEC = 0.5
 # Без межпроцессного замка файл не схлопывают: перезапись способна съесть чужую строку,
 # а длинный файл не вредит никому (и read(), и said_recently() берут хвост). Но расти
-# бесконечно он тоже не должен — вот во сколько раз выше MAX_LINES проходит тот потолок,
+# бесконечно он тоже не должен — вот во сколько раз выше проходит тот потолок,
 # после которого схлопываем как умеем.
 _UNLOCKED_TRIM_FACTOR = 20
 
@@ -134,11 +158,81 @@ def _safe(chat_id: str | int) -> str:
     return re.sub(r"[^\w-]", "_", str(chat_id)) or "chat"
 
 
+def local_now_from(ts: float) -> _dt.datetime:
+    """Момент `ts` её часами. Тот же расчёт, что в _local_now, но для прошлого события."""
+    tz_name = (os.getenv("PRAXIS_TZ") or "Europe/Moscow").strip()
+    try:
+        from zoneinfo import ZoneInfo
+
+        return _dt.datetime.fromtimestamp(float(ts), ZoneInfo(tz_name))
+    except Exception:
+        try:
+            off = int(os.getenv("PRAXIS_TZ_OFFSET_H", "3"))
+        except ValueError:
+            off = 3
+        return _dt.datetime.fromtimestamp(float(ts), _dt.timezone(_dt.timedelta(hours=off)))
+
+
+def _local_now() -> _dt.datetime:
+    """Её часы, а не часы контейнера.
+
+    Записка штамповалась `datetime.now()`, то есть UTC (в контейнере задан только
+    PRAXIS_TZ, TZ нет), а её собственные часы во всех остальных местах кадра рисуются
+    в PRAXIS_TZ. 01.08 это стоило повтора: утреннее приветствие, отправленное в 07:30
+    по её времени, лежало в записке как «03:30» — в кадре, где «сейчас 09:29», оно
+    читается как ночное сообщение, а не как «я уже сегодня здоровалась».
+
+    Логика та же, что в heartbeat.local_now; импортировать heartbeat отсюда нельзя —
+    записка обязана оставаться листом без зависимостей (её пишут два процесса).
+    """
+    tz_name = (os.getenv("PRAXIS_TZ") or "Europe/Moscow").strip()
+    try:
+        from zoneinfo import ZoneInfo
+
+        return _dt.datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        try:
+            off = int(os.getenv("PRAXIS_TZ_OFFSET_H", "3"))
+        except ValueError:
+            off = 3
+        return _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=off)))
+
+
 def path_for(chat_id: str | int) -> Path:
     return SCRATCH_DIR / f"{_safe(chat_id)}.md"
 
 
-def read(chat_id: str | int, max_lines: int = MAX_LINES) -> str:
+#: Голова записи — штамп из append(): f"{_local_now():%H:%M} · {line}". Строка без
+#: головы — продолжение предыдущей записи, а не самостоятельная запись.
+_ENTRY_HEAD = re.compile(r"^\d{1,2}:\d{2} · ")
+
+
+def _entries(lines: list[str]) -> list[list[str]]:
+    """Строки записки → ЗАПИСИ. Ведущая группа без головы — обломок, а не запись."""
+    groups: list[list[str]] = []
+    for line in lines:
+        if _ENTRY_HEAD.match(line) or not groups:
+            groups.append([line])
+        else:
+            groups[-1].append(line)
+    return groups
+
+
+def _tail(lines: list[str], keep: int) -> list[str]:
+    """Последние `keep` записей ЦЕЛИКОМ.
+
+    Безголовый ведущий кусок отбрасывается: он остался от прежнего схлопывания по
+    строкам и читается как чужая фраза без времени и без начала. Но только когда есть
+    что оставить взамен — записка без единого штампа (старый формат, ручная правка)
+    отдаётся как есть, иначе починка съела бы её память целиком.
+    """
+    groups = _entries(lines)
+    if len(groups) > 1 and not _ENTRY_HEAD.match(groups[0][0]):
+        groups = groups[1:]
+    return [line for group in groups[-keep:] for line in group]
+
+
+def read(chat_id: str | int, max_entries: int = MAX_ENTRIES) -> str:
     """Её записка себе по этому разговору — ровно её собственная нить.
 
     ⚠ Здесь была склейка с соседними ветками одной комнаты, отсортированная по `ЧЧ:ММ`
@@ -150,13 +244,18 @@ def read(chat_id: str | int, max_lines: int = MAX_LINES) -> str:
     Ради чего склейка делалась — анти-повтор через ветки — живёт теперь в
     `said_recently`, где порядок строк вообще не нужен: там вопрос «говорила ли», а не
     «в каком порядке». Чинить порядок в том, чему порядок не нужен, было ошибкой.
+
+    ⚠ 03.08.2026 вторая половина той же ошибки: срез брался по СТРОКАМ (`lines[-n:]`),
+    а записи многострочные — 52% на её живых файлах. Поэтому окно регулярно
+    приземлялось в середину записи, и она читала хвост чужой фразы без времени и без
+    начала. Теперь единица среза — ЗАПИСЬ, и запись либо видна целиком, либо не видна.
     """
     p = path_for(chat_id)
     if not p.exists():
         return ""
     lines = [l for l in p.read_text(encoding="utf-8", errors="ignore").splitlines()
              if l.strip()]
-    return "\n".join(lines[-max_lines:])
+    return "\n".join(_tail(lines, max_entries))
 
 
 def _sibling_files(chat_id: str | int) -> list[Path]:
@@ -358,7 +457,8 @@ def lock_kind() -> str:
         пройдёт само;
       • `none: …` — этого том (или питон) не умеет. Свойство МЕСТА, где она живёт: само
         не пройдёт, межпроцессной половины защиты здесь не будет никогда, и схлопывание
-        идёт по потолку `MAX_LINES * _UNLOCKED_TRIM_FACTOR`.
+        идёт по потолку `MAX_ENTRIES * _UNLOCKED_TRIM_FACTOR` (он в СТРОКАХ: это
+        про размер файла, а не про читаемость).
     ⚠ Раньше вторые два ответа сливались в одно «none: замок не берётся на этом томе» —
     занятый на полсекунды замок читался как «том не умеет». Одно лечится ожиданием,
     другое переездом; выдавать первое за второе — врать ей о её же доме.
@@ -444,7 +544,11 @@ def _write_lines(p: Path, lines: list[str], expect: os.stat_result | None = None
 
 
 def _collapse(p: Path, keep: int) -> bool:
-    """Схлопнуть записку до последних `keep` строк — но только по СВЕЖЕМУ снимку.
+    """Схлопнуть записку до последних `keep` ЗАПИСЕЙ — но только по СВЕЖЕМУ снимку.
+
+    ⚠ 03.08.2026 здесь резалось по СТРОКАМ, и это было хуже, чем неудобное чтение:
+    обломок ложился на диск. Прочитать целую запись после такого схлопывания было
+    уже нечем — её половина стёрта из единственного места, где она была.
 
     Три захода: между чтением и подменой второй писатель мог дописать строку мимо замка,
     и тогда снимок устарел — схлопывать по нему нельзя, съест чужое слово. Не сошлось
@@ -458,9 +562,10 @@ def _collapse(p: Path, keep: int) -> bool:
         except OSError:                            # так изменение во время чтения тоже видно
             return False
         lines = _read_lines(p)
-        if len(lines) <= keep:
+        kept = _tail(lines, keep)
+        if len(kept) >= len(lines):
             return True
-        if _write_lines(p, lines[-keep:], expect=st):
+        if _write_lines(p, kept, expect=st):
             return True
     return False
 
@@ -553,7 +658,7 @@ def append(chat_id: str | int, line: str) -> None:
         return
     SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
     p = path_for(chat_id)
-    stamped = f"{_dt.datetime.now():%H:%M} · {line}"
+    stamped = f"{_local_now():%H:%M} · {line}"
     with _writer_lock(p):
         with _exclusive(p) as lock:
             # Слой 3 идёт ПЕРВЫМ и всегда — чем бы ни кончилась возня с замком ниже, её
@@ -571,13 +676,13 @@ def append(chat_id: str | int, line: str) -> None:
                             p.name)
                 return
             if lock.owned:
-                if not _collapse(p, MAX_LINES):
+                if not _collapse(p, MAX_ENTRIES):
                     log.warning("записка [%s]: файл менялся под замком — не схлопнула, "
                                 "чтобы не съесть чужую строку; строк сейчас %d",
                                 p.name, len(_read_lines(p)))
                 return
             extra = _read_lines(p)
-            if len(extra) < MAX_LINES * _UNLOCKED_TRIM_FACTOR:
+            if len(extra) < MAX_ENTRIES * _UNLOCKED_TRIM_FACTOR:
                 # Причину `_acquire` уже назвал — отдельно звать `lock_kind()` нельзя:
                 # диагностика сама берёт замок и ждёт, а это путь каждой её реплики.
                 log.warning("записка [%s]: межпроцессный замок не взят (%s) — строка "
@@ -589,7 +694,7 @@ def append(chat_id: str | int, line: str) -> None:
             log.warning("записка [%s]: %d строк без межпроцессного замка (%s) — схлопываю "
                         "перезаписью по свежему снимку; не сойдётся — останется длинным",
                         p.name, len(extra), lock.why or "причина не названа")
-            _collapse(p, MAX_LINES)
+            _collapse(p, MAX_ENTRIES)
 
 
 def _norm(s: str) -> str:
@@ -609,7 +714,8 @@ def _similar(gist: str, text: str) -> bool:
     return difflib.SequenceMatcher(None, g, head).ratio() >= _SIMILAR_THRESHOLD
 
 
-def said_recently(chat_id: str | int, text: str, max_lines: int = MAX_LINES) -> bool:
+def said_recently(chat_id: str | int, text: str,
+                  max_entries: int = MAX_ENTRIES) -> bool:
     """Говорила ли она это (близко по форме) недавно в этом МЕСТЕ — СПРАВКА, не запрет.
 
     Из боевого кода не вызывается ни разу (см. докстринг модуля: блокирующая форма снята
@@ -628,9 +734,14 @@ def said_recently(chat_id: str | int, text: str, max_lines: int = MAX_LINES) -> 
         if not path.exists():
             continue
         lines = [l for l in path.read_text(encoding="utf-8", errors="ignore").splitlines()
-                 if l.strip()][-max_lines:]
-        for line in lines:
-            for gist in _QUOTE_RE.findall(line):
+                 if l.strip()]
+        for group in _entries(lines)[-max_entries:]:
+            # ⚠ Цитата искалась ПОСТРОЧНО. Её реплика открывает «…» на первой строке и
+            # закрывает на третьей, поэтому ни одна строка не содержала пары целиком, и
+            # `_QUOTE_RE` не находил ничего. Проба 03.08 на её живом файле: её же слова,
+            # поданные обратно дословно, дали False. Слепота покрывала 52% её записей —
+            # то есть большинство того, о чём эта справка и должна отвечать.
+            for gist in _QUOTE_RE.findall("\n".join(group)):
                 if _similar(gist, text):
                     return True
     return False

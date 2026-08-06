@@ -339,15 +339,26 @@ class TestUsageMeter(BufBase):
         self.assertEqual(v.get("cache_creation"), 200)
         # model breakdown тоже хранит
         self.assertEqual(v.get("models", {}).get("glm-5.2", {}).get("cache_read"), 800)
-        # usage_line показывает cache
+        # 02.08: прибор показывает не сырую пару r/c, а то, что действительно означает
+        # расход — долю кэша и СВЕЖИЙ вход (`in − cache_read`). Кэшированный префикс
+        # провайдер уже держит; платится за остальное. Контракт этого теста — «метрики
+        # видны в usage_line» — прежний, проверяется по смыслу, а не по слову «cache».
         line = llm.usage_line()
-        self.assertIn("cache", line)
+        self.assertIn("кэш 80%", line)
+        self.assertIn("свежего входа 200", line)
+        self.assertIn("записи в кэш 200", line)
 
     def test_usage_no_cache_metrics_when_absent(self):
-        """Без cache-метрик usage_line не показывает cache."""
+        """Без cache-метрик usage_line молчит про кэш.
+
+        Молчание тут значит «провайдер не сказал», а не «кэша нет» — путать эти два
+        факта дороже, чем не показать число (02.08: реле теряло поле, и нули читались
+        как «кэш не работает», хотя апстрим кэшировал на 85%).
+        """
         llm._usage_add("evaluator", {"in": 500, "out": 50})
         line = llm.usage_line()
-        self.assertNotIn("cache", line)
+        self.assertNotIn("кэш", line)
+        self.assertNotIn("свежего входа", line)
 
     def test_usage_days_window(self):
         old = (_dt.date.today() - _dt.timedelta(days=10)).isoformat()
@@ -385,6 +396,8 @@ class TestUsageMeter(BufBase):
 # --------------------------------------------------------------------------- #
 
 import shutil
+
+import _standenv
 import subprocess
 import tempfile
 from pathlib import Path
@@ -411,9 +424,10 @@ def _mk_repo() -> Path:
         "class T(unittest.TestCase):\n"
         "    def test_v(self):\n"
         "        self.assertIn(core.VALUE, (1, 2))\n", encoding="utf-8")
-    source = Path(__file__).resolve().parent
-    shutil.copy2(source / "praxis_test.py", d / "praxis_test.py")
-    shutil.copy2(source / "_sandbox.py", d / "_sandbox.py")
+    # Та же дверь, что у живого репо; список её файлов читается из самой двери.
+    # 03.08.2026 здесь был свой рукописный список — вторая копия одной и той же
+    # логики, и отстала она вместе с первой.
+    _standenv.copy_door(Path(__file__).resolve().parent, d)
     _sh(d, "git", "add", "-A")
     _sh(d, "git", "commit", "-q", "-m", "init")
     return d

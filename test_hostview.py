@@ -225,8 +225,13 @@ class TestHerEyesNeverThrow(unittest.TestCase):
     def test_dead_observatory_is_an_honest_sentence(self):
         hostview.os.environ["PRAXIS_AGENT_TOKEN"] = "секрет"
         hostview.fetch = lambda: None
+        # ⚠ Слово «обсерватория» истинно и в ветке «молчит», и в ветке «глаза нет» —
+        # ассерт не различал их. Спрашиваем различающий текст и ставим анти-страж:
+        # упоминание переменной токена значит, что мы провалились не в ту ветку.
+        self.assertTrue(hostview.available(), "токен поставлен — глаза есть")
         out = hostview.describe("overview")
         self.assertIn("обсерватория", out.lower())
+        self.assertNotIn("PRAXIS_AGENT_TOKEN", out, "это ветка «глаз нет», а не «молчит»")
         self.assertNotIn("Traceback", out)
 
     def test_url_error_becomes_none_not_exception(self):

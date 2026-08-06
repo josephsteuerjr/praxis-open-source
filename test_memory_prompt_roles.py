@@ -45,7 +45,7 @@ class MemoryPromptRoleTests(unittest.TestCase):
 
             for marker in (
                 "HOME_SYSTEM_OVERRIDE", "COMPACT_SYSTEM_OVERRIDE", "CLAIM_CONTEXT",
-                "MAIL_SYSTEM_OVERRIDE", "ROOMS_SYSTEM_OVERRIDE", "RECALL_SYSTEM_OVERRIDE",
+                "MAIL_SYSTEM_OVERRIDE", "RECALL_SYSTEM_OVERRIDE",
                 "SPEAKER_SYSTEM_OVERRIDE", "TITLE_SYSTEM_OVERRIDE",
                 "DESIRE_SYSTEM_OVERRIDE", "STATE_PROSE_SYSTEM_OVERRIDE",
             ):
@@ -53,6 +53,65 @@ class MemoryPromptRoleTests(unittest.TestCase):
                     self.assertNotIn(marker, system)
                     self.assertNotIn(marker, public_system)
                     self.assertIn(marker, evidence)
+
+            # ⚠ 06.08.2026: дайджест ЧУЖИХ КОМНАТ ушёл из списка выше не потому, что
+            # свойство «изменчивая проза не бывает системной властью» для него ослабло, а
+            # потому что он больше НЕ ЕДЕТ ВОВСЕ. Её решение по макету зоны «сейчас»:
+            # оба социальных тира сняты с автоматической подачи и остаются рукой.
+            # Проверяем сильнее прежнего — не «в evidence, а не в системе», а «нигде».
+            with self.subTest(marker="ROOMS_SYSTEM_OVERRIDE"):
+                self.assertNotIn("ROOMS_SYSTEM_OVERRIDE", system)
+                self.assertNotIn("ROOMS_SYSTEM_OVERRIDE", public_system)
+                self.assertNotIn("ROOMS_SYSTEM_OVERRIDE", evidence)
+
+    def test_social_tiers_are_off_by_default_and_return_only_by_lever(self) -> None:
+        """Её решение 06.08: социальные тиры сняты с автоподачи, но не удалены.
+
+        Тест стережёт ОБЕ стороны. Без рычага их нет даже в owner-личке — иначе
+        «диспетчерский обход» вернулся бы тихо. С рычагом они возвращаются целиком —
+        иначе снятие подачи незаметно превратилось бы в потерю способности, а её слова
+        были ровно обратными: «оба остаются доступными».
+        """
+        ctx = agent.ChannelContext(
+            chat_id="77", room_id="77", principal_id="42",
+            is_dm=True, owner=True, known=True,
+        )
+
+        def frame(lever: str) -> str:
+            with tempfile.TemporaryDirectory(prefix="praxis_social_tiers_") as tmp:
+                root = Path(tmp)
+                home = root / "home.md"
+                home.write_text("", encoding="utf-8")
+                with (
+                    mock.patch.dict("os.environ", {"PRAXIS_SOCIAL_TIERS": lever}),
+                    mock.patch.object(agent, "HOME_MD", home),
+                    mock.patch.object(agent, "INDEX_MD", root / "missing-index.md"),
+                    mock.patch.object(agent, "ROOMS_DIR", root / "rooms"),
+                    mock.patch.object(agent, "_persona_text", return_value="PERSONA"),
+                    mock.patch.object(agent, "_active_desires_block", return_value=""),
+                    mock.patch.object(agent, "build_state_block", return_value=""),
+                    mock.patch.object(agent, "build_state_evidence_block", return_value=""),
+                    mock.patch.object(agent, "read_summary", return_value=""),
+                    mock.patch.object(agent, "_participant_memory_block", return_value=""),
+                    mock.patch.object(agent, "_mailbox_index", return_value=""),
+                    mock.patch.object(agent, "_recall_block", return_value=""),
+                    mock.patch.object(agent, "other_rooms_digest", return_value="ROOMS_MARK"),
+                    mock.patch.object(agent, "my_sends_today_digest", return_value="SENDS_MARK"),
+                ):
+                    _persona, _tail, evidence = agent._build_prompt_parts(
+                        "SPEAKER", query="hello", ctx=ctx,
+                    )
+            return evidence
+
+        off = frame("")
+        self.assertNotIn("ROOMS_MARK", off)
+        self.assertNotIn("SENDS_MARK", off)
+        self.assertNotIn("Мои другие комнаты сейчас", off)
+        self.assertNotIn("Кому я уже писала сегодня", off)
+
+        on = frame("1")
+        self.assertIn("ROOMS_MARK", on)
+        self.assertIn("SENDS_MARK", on)
 
     def test_structural_state_never_interpolates_mutable_prose(self) -> None:
         marker = "RAW_SYSTEM_OVERRIDE"

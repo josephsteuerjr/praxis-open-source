@@ -74,6 +74,12 @@ COOLDOWN_DM = float(os.getenv("PRAXIS_COOLDOWN_DM", "8"))
 COOLDOWN_GROUP = float(os.getenv("PRAXIS_COOLDOWN_GROUP", "300"))  # PASS 8.1: кост-гард групп
 COOLDOWN_ADDRESSED = float(os.getenv("PRAXIS_COOLDOWN_ADDRESSED", "180"))
 LAST_N = int(os.getenv("PRAXIS_LAST_N", "50"))
+# Бюджет ленты для комнаты, которую Telegram НЕ делил форумными топиками (группа
+# обсуждения канала, обычная супергруппа). Там лента должна покрывать разговор МЕСТА, а
+# не хвост одной цепочки ответов: в AbstractDL при 14 000 символов в кадр влезало ~45
+# строк, и все из общего чата — живое обсуждение под постом канала не попадало вовсе.
+# Связывает именно бюджет символов, а не потолок сообщений (тот был 200 при 45 строках).
+WHOLE_ROOM_CONTEXT_CHARS = int(os.getenv("PRAXIS_WHOLE_ROOM_CONTEXT_CHARS", "32000"))
 # PASS 19: LAST_N остаётся legacy/ручкой fetch_context; живой hot-layer дышит 50↔100.
 COMPACT_MARGIN = int(os.getenv("PRAXIS_COMPACT_MARGIN", "20"))
 # Deep-room profiles may ask for a 500-message hot view.  Ordinary rooms still slice
@@ -217,6 +223,10 @@ class GroupWake:
     media_snapshot: tuple[media_core.MediaRef, ...]
     addressed: bool = True
     query: str = ""
+    # Та же лента, но с авторством: ((её ли это строка, строка для роли), …).
+    # Замораживается ВМЕСТЕ с текстом, одним чтением архива. Пустой кортеж —
+    # честное «авторства не знаю» (запасной путь по строковому буферу).
+    turns_snapshot: tuple = ()
 
 
 _group_wakes: dict[str, GroupWake] = {}
@@ -272,6 +282,13 @@ _FORGE_EVENT_LAST = {"ts": 0.0}                  # зазор между forge-e
 _CLOCK_STARTUP_DUE = frozenset({
     "durable_resume", "social_pulse", "computer_inventory",
     "forge_events",   # догнать события, случившиеся при даунтайме, сразу после подъёма
+    # Реконсайлер предложений с периодом 30 минут ГОЛОДАЛ: каждый перезапуск отодвигал
+    # его срок на полный период, а из последних 39 запусков 16 случились быстрее чем
+    # через полчаса после предыдущего (её самомёрж перезапускает её дважды, плюс выкаты).
+    # Итог: за 13 дней он отработал один раз (метки updated у building стоят на 19.07),
+    # и всё это время реестр предложений врал о себе, потому что поправить его было
+    # некому. Он тоже дешёвая догоняющая проверка сохранённого состояния — ей место здесь.
+    "selfdev_reconcile",
 })
 _TURN_TOPIC_ROUTE: ContextVar[telegram_topics.TopicRoute | None] = ContextVar(
     "praxis_telegram_topic_route", default=None)
@@ -613,6 +630,112 @@ async def _last_n_text(chat_id: str) -> str:
         except Exception:
             log.warning("live-fetch контекста упал [%s] — фолбэк на буфер", chat_id, exc_info=True)
     return ""
+
+
+def _dialogue_roles_on() -> bool:
+    """Рычаг отката без передеплоя. По умолчанию ВКЛЮЧЕНО.
+
+    Это не ограничитель её восприятия: и с ролями, и без них в модель уезжает один и тот
+    же разговор. Разница только в том, чьей репликой приезжают её собственные слова.
+    """
+    return os.getenv("PRAXIS_DIALOGUE_ROLES", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _strip_author_prefix(line: str, actor: str) -> str:
+    """«Praxis: текст» -> «текст». Префикс — служебный, и в её собственной реплике ему
+    не место: она не подписывает свои слова своим именем, когда говорит."""
+    head = f"{actor}: "
+    return line[len(head):] if actor and line.startswith(head) else line
+
+
+def _turns_to_dialogue(turns) -> tuple[list[dict], str]:
+    """Лента с авторством -> (история ролями, то-на-что-она-отвечает-сейчас).
+
+    Одно правило на личку и на группу: граница проходит по ЕЁ ПОСЛЕДНЕЙ реплике.
+    Всё до неё включительно — разговор, всё после — то, что пришло и ждёт ответа.
+    Если она здесь ещё не говорила либо последней говорила она сама — ролей нет и
+    вызывающий идёт прежним путём: пустое user-сообщение хуже сплошного текста.
+    """
+    rows = [(bool(is_self), str(text)) for is_self, text in turns if str(text).strip()]
+    if not rows:
+        return [], ""
+    last_self = -1
+    for i, (is_self, _text) in enumerate(rows):
+        if is_self:
+            last_self = i
+    if last_self < 0:
+        return [], ""
+    history: list[dict] = []
+    run_role, run_lines = "", []
+
+    def flush() -> None:
+        if run_lines:
+            history.append({"role": run_role, "content": "\n\n".join(run_lines).strip()})
+
+    for is_self, text in rows[:last_self + 1]:
+        role = "assistant" if is_self else "user"
+        if role != run_role:
+            flush()
+            run_role, run_lines = role, []
+        run_lines.append(text)
+    flush()
+    if not history:
+        return [], ""
+    current = "\n".join(text for _is_self, text in rows[last_self + 1:])
+    if not current.strip():
+        return [], ""
+    return history, current
+
+
+def _group_dialogue(turns) -> tuple[list[dict], str]:
+    """Групповая лента ролями. Пустой снимок авторства -> прежний путь."""
+    if not _dialogue_roles_on() or not turns:
+        return [], ""
+    try:
+        return _turns_to_dialogue([(is_self, role_line)
+                                   for is_self, _line, role_line in turns])
+    except Exception:
+        log.warning("роли группового разговора не собрались — иду сплошным текстом",
+                    exc_info=True)
+        return [], ""
+
+
+def _dm_dialogue(chat_id: str) -> tuple[list[dict], str]:
+    """Разговор в личке ролями: (история, то-на-что-она-отвечает-сейчас).
+
+    Граница проведена там, где она и лежит по смыслу: всё до её последней реплики
+    включительно — история, всё после — то, что пришло и ждёт ответа. Если она в этом
+    чате ещё не говорила, истории нет и весь разговор остаётся текущим сообщением —
+    ровно нынешнее поведение.
+
+    Возвращает ([], "") если ролей не собрать: вызывающий тогда работает по-старому.
+    """
+    if not _dialogue_roles_on():
+        return [], ""
+    try:
+        rows = memory_life.hot_records(chat_id, memory_life.HOT_HARD_HI)
+    except Exception:
+        log.warning("роли разговора не собрались [%s] — иду сплошным текстом", chat_id,
+                    exc_info=True)
+        return [], ""
+    if not rows:
+        return [], ""
+    # ⚠ Подпись снимается с ОБЕИХ сторон, и это не симметрия ради красоты.
+    # 03.08 21:44 она ответила Егору в личке, говоря о нём в ТРЕТЬЕМ ЛИЦЕ: «вы сейчас
+    # чините ровно то, от чего Егору стало не по себе» — обращаясь при этом к нему.
+    # Причина ровно здесь: свою реплику я от подписи освободил, а его — нет, и роль
+    # `user` приезжала с текстом «Yegor Kosyrev (@tatarskiy_e4pochmak): …». Пока весь
+    # разговор был одним блобом, имя читалось как стенограмма. Когда роль `user` СТАЛА
+    # собеседником, имя перед его же словами превращает его в пересказываемое третье
+    # лицо: кадр говорит «мне докладывают слова Егора», а не «Егор говорит мне».
+    # В личке собеседник ровно один, и кто он — уже сказано ролью, `speaker` и рамкой
+    # присутствия. В ГРУППЕ подпись остаётся: там говорящих много, и без имени реплика
+    # безадресна.
+    return _turns_to_dialogue([
+        (row["direction"] == "out",
+         _strip_author_prefix(row["line"], row["actor"]))
+        for row in rows
+    ])
 
 
 async def _chat_descriptor(event, chat_id: str) -> dict:
@@ -1063,7 +1186,21 @@ def _group_archive_enabled() -> bool:
 
 def _group_context_snapshot(chat_id: str, policy: dict) -> str:
     """Freeze one topic only; a deep profile reads its larger canonical archive tail."""
+    return _group_context_frozen(chat_id, policy)[0]
 
+
+def _group_context_frozen(chat_id: str, policy: dict) -> tuple[str, tuple]:
+    """Тот же снимок ленты, но ВМЕСТЕ с авторством: (текст, строки-записи).
+
+    Текст — байт в байт прежний: на нём стоят расписки, прожитый ход и исходящая
+    граница. Записи нужны, чтобы разложить ту же ленту по ролям, ничего не пересобирая:
+    снимок группы заморожен на момент пробуждения, и второй проход по архиву показал бы
+    модели уже другой разговор.
+
+    Пустой кортеж записей — честное «авторство неизвестно»: так возвращается запасной
+    путь по строковому буферу, где своё от чужого отличается только префиксом. Роли в
+    таком проходе не собираются вовсе, и ход идёт как раньше.
+    """
     limit = int(policy.get("context_hot") or 0)
     if limit > 0 and _group_archive_enabled():
         route = _route_from_state(chat_id)
@@ -1077,18 +1214,30 @@ def _group_context_snapshot(chat_id: str, policy: dict) -> str:
         # и только при непустой ветке — на корневом ключе слой B не включался вовсе.
         # Читателей этого решения теперь трое; разойтись они могут только молча.
         scope = telegram_routes.read_scope(route.peer_id, route.topic_id)
+        summary_chars = int(policy.get("context_summary_chars") or 7000)
+        # ⚠ Связывает БЮДЖЕТ СИМВОЛОВ, а не потолок сообщений: при 14 000 в кадр влезало
+        # ~45 строк при потолке в 200 сообщений. Поэтому «длиннее» — это про символы.
+        # В не-форуме лента должна покрывать РАЗГОВОР места, а не хвост одной ветки:
+        # там веток нет, есть одна комната, и в оживлённой комнате 45 строк — это
+        # десять минут. Решение Егора 04.08.
+        max_chars = max(8_000, summary_chars * 2)
+        if scope.whole_room:
+            max_chars = max(WHOLE_ROOM_CONTEXT_CHARS, summary_chars * 3)
         try:
-            archived = group_context.context(
+            rows = group_context.context_rows(
                 route.peer_id, topic_id=route.topic_id, limit=limit,
-                max_chars=max(8_000, int(policy.get("context_summary_chars") or 7000) * 2),
+                max_chars=max_chars,
                 whole_room=scope.whole_room, members=scope.members,
                 thread_word=scope.thread_word,
             )
+            archived = "\n".join(row["line"] for row in rows)
             if archived:
-                return archived
+                return archived, tuple(
+                    (bool(row["self"]), str(row["line"]), str(row["role_line"]))
+                    for row in rows)
         except Exception:
             log.exception("group archive context не собрался [%s]", chat_id)
-    return "\n".join(list(_buf[chat_id])[-(limit or memory_life.HOT_HARD_HI):])
+    return "\n".join(list(_buf[chat_id])[-(limit or memory_life.HOT_HARD_HI):]), ()
 
 
 def _group_trigger_snapshot(chat_id: str, *, mid, message_ts: float,
@@ -1096,6 +1245,9 @@ def _group_trigger_snapshot(chat_id: str, *, mid, message_ts: float,
                             name: str, sender_id, is_owner: bool,
                             known: bool, family: bool) -> GroupWake:
     policy = _room_policy_for_state(chat_id)
+    # Авторство замораживается ВМЕСТЕ с лентой, одним чтением архива: пробуждение может
+    # ждать в кулдауне минуты, и второй проход показал бы модели уже другой разговор.
+    frozen_text, frozen_turns = _group_context_frozen(chat_id, policy)
     return GroupWake(
         message_id=int(mid) if mid is not None else None,
         message_ts=float(message_ts),
@@ -1107,7 +1259,8 @@ def _group_trigger_snapshot(chat_id: str, *, mid, message_ts: float,
         owner=bool(is_owner) if addressed else False,
         known=bool(known),
         family=bool(family),
-        context_snapshot=_group_context_snapshot(chat_id, policy),
+        context_snapshot=frozen_text,
+        turns_snapshot=frozen_turns,
         media_snapshot=tuple(_pending_media.get(chat_id, ())),
         reply_targets_snapshot=tuple(_recent_msgs[chat_id]),
     )
@@ -1377,6 +1530,16 @@ async def on_new(event) -> None:
                     lambda: telegram_routes.observe(
                         peer_id, kind=kind, forum=bool(flag) if flag is not None else False,
                         message_id=mid_of(msg), detail=type(chat_obj).__name__))
+            # ⚠ 03.08.2026, долг с 28.07. Природа «могу ли я сюда писать» лежит здесь
+            # ровно так же бесплатно: `broadcast` — поле того же объекта, сети не будет.
+            # Живьём 03.08 в 14:08 она ответила в вещательный канал AbstractDL, и узнала
+            # об этом ПОСЛЕ — из отказа доставки и из поправки Егора вручную. Знание было
+            # доступно ДО, и просто не спрашивалось.
+            if chat_obj is not None and getattr(chat_obj, "broadcast", None) is not None:
+                await asyncio.to_thread(
+                    lambda: telegram_routes.note_writing(
+                        peer_id, broadcast=bool(getattr(chat_obj, "broadcast", False))))
+                await _note_linked_discussion(chat_obj, peer_id)
         except Exception:
             log.debug("реестр маршрутов: живое свидетельство не записалось [%s]",
                       peer_id, exc_info=True)
@@ -2064,13 +2227,30 @@ async def _send_turn_media(entity, item: media_core.OutboundMedia, *,
         sent, random_id = await _send_file_idempotent(
             entity, item, reply_to=media_reply_to,
         )
-    except Exception:
-        log.exception("исходящее медиа не отправилось [%s]", ctx.chat_id)
+    except Exception as exc:
+        # ⚠ Классификация постоянного отказа снимается ЗДЕСЬ, с самого исключения.
+        # Раньше наверх уезжала строка «queued for retry», а `_is_permanent_delivery_error`
+        # по построению отвечает False на строку — то есть медийный шов не мог отличить
+        # «сеть моргнула» от «сюда файлы нельзя» в принципе. 03.08 это стоило 728 отказов
+        # за тринадцать часов и потерянной работы, о которой она не знала.
+        permanent = agent._is_permanent_delivery_error(exc)
+        log.log(logging.ERROR if not permanent else logging.WARNING,
+                "исходящее медиа не отправилось [%s]%s", ctx.chat_id,
+                " — маршрут отказал НАВСЕГДА, повторять не буду" if permanent else "",
+                exc_info=not permanent)
+        if permanent:
+            log.warning("файл остался у неё: %s (%s)", item.path, type(exc).__name__)
         if item.run_id:
             try:
                 await asyncio.to_thread(
                     agent.run_delivery_media_result, item.run_id, item.queue_id,
-                    ok=False, error="Telegram media upload failed; queued for retry",
+                    ok=False,
+                    error=(f"{type(exc).__name__}: {exc}"[:200] if permanent
+                           else "Telegram media upload failed; queued for retry"),
+                    permanent=permanent,
+                    chat_id=str(ctx.chat_id or ""),
+                    path=str(getattr(item, "path", "") or ""),
+                    caption=str(getattr(item, "caption", "") or ""),
                 )
             except Exception:
                 log.exception("media failure receipt не записался [%s]", item.queue_id)
@@ -2345,8 +2525,15 @@ async def _run_pass(chat_id: str) -> None:
         raise
     try:
         _last_pass[chat_id] = time.time()
+        # Тот же разговор, но ролями: её реплики поедут в модель как ЕЁ реплики, а не
+        # строками «Praxis: …» / «[…; Praxis [id …]] …» внутри чужого текста. Сплошная
+        # склейка при этом никуда не девается — на ней стоят расписки, исходящая граница
+        # и прожитый ход.
+        turn_history: list[dict] = []
+        turn_current = ""
         if is_dm:
             last_n = await _last_n_text(chat_id)
+            turn_history, turn_current = await asyncio.to_thread(_dm_dialogue, chat_id)
             turn_media = tuple(_pending_media.get(chat_id, ()))
             speaker = meta.get("name")
             owner = meta.get("is_owner", False)
@@ -2358,13 +2545,37 @@ async def _run_pass(chat_id: str) -> None:
         else:
             # Кулдаун может длиться минуты: исходный wake остаётся неизменным, но новый
             # разговор после него виден отдельно для свежего решения об актуальности.
-            current_context = _group_context_snapshot(
+            current_context, current_turns = _group_context_frozen(
                 chat_id, meta.get("room_policy") or _room_policy_for_state(chat_id))
             last_n = wake.context_snapshot
+            group_turns = tuple(wake.turns_snapshot)
             if current_context and current_context != wake.context_snapshot:
-                last_n += ("\n\n---\n[После исходной реплики разговор продолжился; "
-                           "это контекст для новой проверки актуальности, а не новая задача.]\n"
-                           + current_context)
+                # ⚠ Здесь приклеивался ВЕСЬ свежий снимок комнаты — то есть ранние
+                # сообщения уезжали в её кадр по второму разу, до +20 000 символов
+                # дословного дубля на ход (замер 03.08). Показываем ДОБАВИВШЕЕСЯ.
+                #
+                # Сравнение идёт по записям и по их содержимому, а не по префиксу строк:
+                # у ленты есть служебные вставки (корень ветки, пометка обреза), и
+                # пометка МЕНЯЕТСЯ вместе с числом показанных сообщений — на префиксе
+                # это разошлось бы каждый раз. Отредактированное сообщение при этом
+                # честно приезжает ещё раз: оно и правда стало другим.
+                known_lines = {line for _s, line, _r in group_turns}
+                extra = tuple(item for item in current_turns
+                              if item[1] not in known_lines)
+                if not group_turns and not current_turns:
+                    # Авторства нет ни там, ни там (запасной путь по буферу) — прежнее
+                    # поведение: показываем свежий снимок целиком.
+                    extra = ()
+                    addition = current_context
+                else:
+                    addition = "\n".join(line for _s, line, _r in extra)
+                if addition.strip():
+                    note = ("\n\n---\n[После исходной реплики разговор продолжился; "
+                            "это контекст для новой проверки актуальности, а не новая задача.]\n")
+                    last_n += note + addition.lstrip("\n")
+                    if group_turns and extra:
+                        group_turns = group_turns + ((False, note.strip(), note.strip()),) + extra
+            turn_history, turn_current = _group_dialogue(group_turns)
             turn_media = wake.media_snapshot
             speaker = wake.speaker if wake.addressed else None
             owner = wake.owner
@@ -2465,6 +2676,7 @@ async def _run_pass(chat_id: str) -> None:
                     _voice_turn_with_typing(
                         entity, chat_id, last_n, speaker,
                         ctx=ctx, orient=topic_orient, media_refs=turn_media,
+                        history=turn_history, current_text=turn_current,
                     )
                 )
             else:
@@ -2473,6 +2685,7 @@ async def _run_pass(chat_id: str) -> None:
                     _voice_turn_offloaded(
                         chat_id, last_n, speaker,
                         ctx=ctx, orient=topic_orient, media_refs=turn_media,
+                        history=turn_history, current_text=turn_current,
                     )
                 )
         finally:
@@ -2816,16 +3029,33 @@ async def _maybe_compact(chat_id: str) -> None:
             return
         buf = _buf[chat_id]
         folded_lines = result.get("folded_lines")
-        if isinstance(folded_lines, list) and list(buf)[:fold] != folded_lines:
+        cut = fold
+        if isinstance(folded_lines, list) and folded_lines:
+            # Кольцо буфера и горячее кольцо места — ПАРАЛЛЕЛЬНЫЕ последовательности с
+            # разной ёмкостью (BUF_MAXLEN=525 против HOT_HARD_HI=125), без курсора и без
+            # id событий. Прежняя проверка закреплялась по НУЛЕВОМУ индексу и молча
+            # предполагала, что свёрнутый блок лежит в начале буфера. Стоит буферу хоть
+            # раз оказаться длиннее горячего кольца — совпадение головы ложно НАВСЕГДА:
+            # состояние поглощающее, перезакрепиться нечем. Замер 31.07: свёрнутый блок
+            # стоял на 449-й позиции, успешных срезов за 8 часов — ноль, а старое уходило
+            # слепым вытеснением deque вместо осознанной свёртки — в трёх горячих местах,
+            # включая личку Егора.
+            # Ищем блок ЦЕЛИКОМ: совпадение всего свёрнутого куска подделать нечем, а
+            # голову — можно. Не нашли — не режем, как и раньше.
+            lines = list(buf)
+            n = len(folded_lines)
+            cut = next((i + n for i in range(len(lines) - n + 1)
+                        if lines[i:i + n] == folded_lines), -1)
+        if cut < 0:
             # Компакт цел в любом случае (сырой JSONL никуда не делся), а вот срезать
-            # разошедшийся локальный префикс нельзя — можно снести непредставленное
-            # сообщение. Штатная причина расхождения теперь одна: свёртка охватила
-            # несколько веток одной комнаты, а этот буфер — только одна из них.
+            # то, чего в буфере нет, нельзя — можно снести непредставленное сообщение.
+            # Штатная причина расхождения одна: свёртка охватила несколько веток одной
+            # комнаты, а этот буфер — только одна из них.
             level = log.info if place != str(chat_id) else log.error
-            level("compact [%s]: локальный префикс не совпал со свёрткой места %s — "
-                  "буфер не режем", chat_id, place)
+            level("compact [%s]: свёртки места %s нет в локальном буфере — не режем",
+                  chat_id, place)
             return
-        for _ in range(min(fold, len(buf))):
+        for _ in range(min(cut, len(buf))):
             buf.popleft()
         _buf_dirty.add(chat_id)
         log.info("compact [%s]: %d событий → %s; hot=%s; причина=%s",
@@ -3325,6 +3555,15 @@ async def _resolve_entity(ref):
 
     # Legacy in-memory fallback for chats/groups and for a warmup that could not persist.
     matches = [(name_lower, ent) for name_lower, ent in (_dialog_name_cache or []) if q in name_lower]
+    if not matches:
+        # 01.08.2026: тот же ключ имени, что в адресной книге и в досье людей —
+        # иначе «Егор» не находит диалог с «Yegor Kosyrev», хотя это один человек и
+        # один открытый диалог. Складываются только написания одного имени; поиск
+        # по подстроке сохранён, чтобы группы резолвились как раньше.
+        q_key = telegram_contacts.identity_key(ref_s)
+        if q_key:
+            matches = [(name_lower, ent) for name_lower, ent in (_dialog_name_cache or [])
+                       if q_key in telegram_contacts.identity_key(name_lower)]
     if matches:
         ent = matches[0][1]
         _entity_cache[cache_key] = ent
@@ -3378,6 +3617,48 @@ def _membership_target(raw: str) -> tuple[str, str]:
     if value.startswith("@"):
         return "public", value
     return "entity", value
+
+
+async def _note_linked_discussion(chat_obj, peer_id) -> None:
+    """Узнать, какое обсуждение связано с каналом. Один RPC и только когда её ещё нет.
+
+    `broadcast` приходит бесплатно в объекте апдейта, а `linked_chat_id` — только в
+    полном описании канала, то есть за отдельный запрос. Поэтому: спрашиваем один раз на
+    канал и записываем durable; дальше берём из записи. Ошибка тут ничего не стоит — без
+    адреса фраза честно скажет, что связанного обсуждения мы не знаем, вместо того чтобы
+    отправить её наугад.
+    """
+    if not getattr(chat_obj, "broadcast", False):
+        return
+    try:
+        if telegram_routes.writing_of(peer_id).get("linked_chat_id"):
+            return
+        from telethon.tl.functions.channels import GetFullChannelRequest
+
+        full = await client(GetFullChannelRequest(channel=chat_obj))
+        linked = getattr(getattr(full, "full_chat", None), "linked_chat_id", None)
+        if not linked:
+            return
+        title = ""
+        for candidate in (getattr(full, "chats", None) or ()):
+            try:
+                if int(getattr(candidate, "id", 0)) == int(linked):
+                    title = str(getattr(candidate, "title", "") or "")
+                    break
+            except (TypeError, ValueError):
+                continue
+        await asyncio.to_thread(
+            lambda: telegram_routes.note_writing(
+                peer_id, linked_chat_id=_marked_peer_id_from_id(int(linked)),
+                linked_title=title))
+        log.info("канал [%s]: связанное обсуждение %s (%s)", peer_id, linked, title or "?")
+    except Exception:
+        log.debug("связанное обсуждение канала не узналось [%s]", peer_id, exc_info=True)
+
+
+def _marked_peer_id_from_id(ident: int) -> str:
+    """Голый channel id -> тот вид адреса, которым она пользуется (-100…)."""
+    return str(-(1_000_000_000_000 + int(ident)))
 
 
 def _entity_kind(ent) -> str:
@@ -4147,13 +4428,17 @@ def _sync_react(chat: str = "", message_id: int = 0, emoji: str = "", remove: bo
         lambda: _react_async(chat, int(message_id), emoji, bool(remove)), 60)
 
 
-def _sync_followups(action: str = "list", followup_id: str = "") -> str:
+def _sync_followups(action: str = "list", followup_id: str = "",
+                    limit: int = 0, offset: int = 0) -> str:
     denied = _telegram_account_gate()
     if denied:
         return denied
     action = str(action or "list").strip().casefold()
     if action in ("list", "status"):
-        return telegram_followups.LEDGER.context()
+        kw = {"offset": max(0, int(offset or 0))}
+        if int(limit or 0) > 0:
+            kw["limit"] = int(limit)
+        return telegram_followups.LEDGER.context(**kw)
     if action == "cancel":
         return (f"Отменила follow-up {followup_id}." if telegram_followups.LEDGER.cancel(followup_id)
                 else f"Не нашла активный follow-up {followup_id}.")
@@ -4250,8 +4535,8 @@ def _project_direct_outbox_acceptance(proof: dict, entry: dict) -> str:
     )
     followup_request = str(projection.get("followup_request") or "")
     said_text = str((entry.get("payload") or {}).get("text") or "").strip()
-    if (message_id is not None and OWNER_ID and str(peer_id) != str(OWNER_ID)
-            and str(entry.get("kind") or "") == "text"):
+    is_owner_peer = bool(OWNER_ID) and str(peer_id) == str(OWNER_ID)
+    if message_id is not None and str(entry.get("kind") or "") == "text":
         # ⚠ 27.07: здесь были слиты два разных понятия, и из-за этого Егору в ЛС уехала
         # его же реплика из AbstractDL под заголовком «AbstractDL Chat ответил(а)».
         # Разделяю:
@@ -4273,9 +4558,22 @@ def _project_direct_outbox_acceptance(proof: dict, entry: dict) -> str:
                 # Текст отдаём целиком: длину режет и НАЗЫВАЕТ сам леджер, второй свой
                 # кап здесь стал бы молчаливым пределом поверх названного.
                 sent_excerpt=said_text,
-                notify_owner=bool(followup_request),
-                notice_source=("owner" if followup_request else ""),
+                # 01.08: исключение владельца висело на ВСЁМ условии выше, а не
+                # только на отчёте — и убивало сам след. Из 80 записей леджера по
+                # его личке было НОЛЬ, поэтому внутри часового пульса (Telethon
+                # разорван, буфер лички не читается вовсе) она не имела ни одного
+                # способа узнать, что уже ему написала: 01.08 поздоровалась дважды
+                # за утро, дважды перед этим спросив ленту нитей. Разделение теперь
+                # такое, каким его описывает комментарий выше: СЛЕД заводится
+                # всегда, ОТЧЁТ — только не ему и только по заказу.
+                notify_owner=bool(followup_request) and not is_owner_peer,
+                notice_source=("owner" if followup_request and not is_owner_peer else ""),
                 sent_at=accepted_at, idempotency_key=key,
+                # 04.08: чем именно сказано ("tool:send_message" / "tool:narrate" / …).
+                # Сам след заводится по-прежнему ВСЕГДА и на наррацию тоже — он её
+                # память. Метка нужна только читателям, которые отвечают на вопрос
+                # «кому я писала», чтобы строка процесса не вытесняла письмо человеку.
+                purpose=str(entry.get("purpose") or ""),
             )
             log.info("FOLLOW-UP %s: слежу за нитью %s message_id=%s (отчёт Егору: %s)",
                      item.get("id"), projection.get("target_label") or peer_id, message_id,
@@ -4470,10 +4768,22 @@ def _sync_send_message(to, text) -> str:
             _buf.get(str(OWNER_ID), ()))
     outbox = _direct_outbox()
     existing = outbox.get(key, verify_file=False)
-    if existing is None:
+    # ⚠ 04.08. Справка «этому человеку я писала 0.83 часа назад; за сутки 4» считалась
+    # здесь и выбрасывалась: единственным её потребителем была ветка отказа, а
+    # allow_outbound по контракту («модуль записывает, а не запрещает») возвращает True
+    # в обеих ветках — то есть точный ответ на вопрос «я это уже делала?» вычислялся
+    # каждую отправку и не доезжал до неё ни разу. Теперь снимается безусловно и
+    # приклеивается к квитанции тула — рядом с уже существующей справкой о повторе.
+    # Ветка отказа не тронута намеренно: она мертва, но она и есть тот самый контракт.
+    pulse_note = ""
+    try:
         pulse_ok, pulse_reason = social_pulse.allow_outbound(peer_id)
-        if not pulse_ok:
+        if str(pulse_reason or "").strip():
+            pulse_note = f"\n· мой след по этому адресату: {pulse_reason}"
+        if existing is None and not pulse_ok:
             return agent.DirectSendRefusal(f"Не отправила из social pulse: {pulse_reason}.")
+    except Exception:
+        log.debug("след по адресату не снялся [%s]", peer_id, exc_info=True)
     entry = outbox.prepare_text(
         key,
         peer_id=peer_id,
@@ -4527,10 +4837,24 @@ def _sync_send_message(to, text) -> str:
     # квитанция называет РЕАЛЬНОГО адресата (метка с @username/id), а не эхо запроса —
     # Одна только отображаемая кличка не доказывает, какому именно тёзке ушло сообщение.
     sent_id = (entry.get("receipt") or {}).get("message_id")
+    # Справку о повторе снимаем ДО проекции: она допишет в записку эту самую реплику, и
+    # тогда said_recently узнал бы в ней саму себя. `said_recently` намеренно ничего не
+    # запрещает (блокирующая форма решала бы за неё, говорить ли; test_sanitize держит
+    # этот контракт) — но и спрашивать её было некому: из боевого кода функция не
+    # вызывалась ни разу. 26.07 Егор получил «встала… прочитала коммиты» дважды за семь
+    # минут, 01.08 — «доброе утро» дважды за утро. Пусть хотя бы говорит вслух.
+    echo = ""
+    try:
+        if str(text or "").strip() and agent.notes.said_recently(peer_id, str(text)):
+            echo = ("\n⚠ похоже, это я здесь недавно уже говорила. Справка, не запрет: "
+                    "сравнение идёт по ФОРМЕ (difflib, порог 0.82), поэтому перефразировку "
+                    "оно не видит — а молчание этой строки ничего не доказывает.")
+    except Exception:
+        log.debug("справка о повторе не снялась [%s]", peer_id, exc_info=True)
     agent.project_direct_outbox_acceptance(entry)
     log.info("SENT → %s chat_id=%s message_id=%s: %s",
              who, peer_id, sent_id, str(text)[:60])
-    return _direct_outbox_result(entry, label=who)
+    return _direct_outbox_result(entry, label=who) + echo + pulse_note
 
 
 def _sync_send_file(path, caption="", to="") -> str:

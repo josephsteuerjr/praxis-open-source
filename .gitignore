@@ -80,6 +80,7 @@ body/state/
 body/body.json
 body/service-body.json
 body/system-router.json
+# Публичный снапшот relay (в проде этого каталога нет): сборка и логи — не исходник.
 relay/target/
 relay/logs/
 relay/*.log

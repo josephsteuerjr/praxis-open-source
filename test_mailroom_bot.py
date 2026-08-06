@@ -1,10 +1,11 @@
-"""Mailroom-бот: валидатор Telegram WebApp initData (HMAC). Безопасность mini-app — owner-only."""
+"""Mailroom-бот: headless runtime, restart signal and retired HTTP compatibility helpers."""
 import asyncio
 import hashlib
 import hmac
 import os
 import sys
 import tempfile
+import inspect
 import time
 import types
 import unittest
@@ -105,6 +106,27 @@ class TestRestartSignal(unittest.TestCase):
         finally:
             mb.agent.RESTART_MAILBOT_FLAG, mb._exit_process = orig_flag, orig_exit
         self.assertFalse(did)
+
+
+class TestHeadlessRuntime(unittest.TestCase):
+    """Production entrypoint must not resurrect the retired Mini App/PWA surface."""
+
+    def test_main_has_no_http_listener_and_clears_menu(self):
+        source = inspect.getsource(mb.main)
+        self.assertNotIn("AppRunner", source)
+        self.assertNotIn("TCPSite", source)
+        self.assertIn("MenuButtonDefault", source)
+
+    def test_reply_keyboard_has_no_webapp_button(self):
+        keyboard = mb._reply_kb()
+        buttons = [button for row in keyboard.keyboard for button in row]
+        self.assertTrue(buttons)
+        self.assertTrue(all(button.web_app is None for button in buttons))
+
+    def test_mail_notification_has_no_webapp_keyboard(self):
+        source = inspect.getsource(mb._poll)
+        self.assertNotIn("_open_kb", source)
+        self.assertNotIn("web_app", source)
 
 
 HOME_TOKEN = "987654:HOME-BOT-TOKEN"

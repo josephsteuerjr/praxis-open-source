@@ -48,6 +48,7 @@ import capabilities
 import computer_memory
 import context_envelope
 import desires
+import frame_trace
 import graph
 import group_context
 import hostops
@@ -66,10 +67,12 @@ import run_context
 import run_executor
 import run_manager
 import run_resume
+import run_snapshot
 import notes
 import people
 import rails
 import rooms
+import lessons
 import selfdev
 import selfgit
 import promises
@@ -84,6 +87,106 @@ import turns
 import unanswered
 import webtool
 from core import secrets as _core_secrets  # 23.07: механический кред-пол гарда (top-level: сбой = loud boot, не тихий fail-open)
+
+
+def _sends_place_key(value: object) -> str:
+    """Одно МЕСТО — один ключ, независимо от того, кто его записал.
+
+    Кольцо ходов пишет ключ разговора (`-100…__topic__N`), след нитей — голый peer.
+    Без сведения к общему виду одна и та же отправка приехала бы в обзор дважды,
+    двумя строками про один чат. Схлопывание — тем же реестром мест, что и в обзоре
+    комнат; без него честный фолбэк на сам ключ.
+    """
+    raw = str(value if value is not None else "").strip()
+    if not raw:
+        return ""
+    try:
+        import telegram_routes
+
+        return str(telegram_routes.place_of(raw) or raw)
+    except Exception:
+        return raw
+
+
+def my_sends_today_digest(max_rows: int = 8, gist: int = 200, budget: int = 1400) -> str:
+    """Прямой ответ на вопрос «кому я сегодня уже писала» — её часами и её словами.
+
+    01.08 два часовых пульса подряд поздоровались с Егором. Данные в кадре БЫЛИ: её первое
+    приветствие стояло в срезе комнат. Но оно было нечитаемо как «я уже это сделала
+    сегодня»: обрезано до 90 символов, подписано UTC при «сейчас 09:29» в том же кадре и
+    размазано среди чужих комнат. А на прямой вопрос (лента нитей) ответ приходил про
+    чужие разговоры двухсуточной давности.
+
+    Срез комнат отвечает «что где происходит». Это — ответ на другой вопрос: «что уже
+    сделала Я и кому». Строится из её же кольца ходов, без единого вызова модели.
+    """
+    try:
+        import turns
+
+        rows = turns.recent(n=120, scope="owner")
+    except Exception:
+        return ""
+    today = notes._local_now().date()
+    seen: dict[str, tuple[float, str, str]] = {}
+    for row in rows:
+        out = str(row.get("out") or "").strip()
+        if not out or str(row.get("delivery") or "") not in ("accepted", "partial"):
+            continue
+        try:
+            ts = float(row.get("ts") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if notes.local_now_from(ts).date() != today:
+            continue
+        key = _sends_place_key(row.get("chat_id"))
+        label = str(row.get("title") or "").strip()
+        if not label:
+            # У лички владельца заголовка в кольце нет, и место вставало голым числом —
+            # глазами она ищет «Егор», а не 809306689.
+            owner = str(os.getenv("PRAXIS_OWNER_ID") or "").strip()
+            label = "Егор (личка)" if owner and key == owner else (key or "?")
+        if key not in seen or ts >= seen[key][0]:
+            seen[key] = (ts, label, out)
+    # ⚠ 04.08. Второй источник — след нитей. Кольцо ходов отвечает только за ГОЛОС:
+    # исход доставки проставляется по run_id, а он есть ровно у живого чат-хода
+    # (agent.py: единственное присвоение turn["run_id"] — в voice_turn_envelope).
+    # Всё, что она говорит ПО СВОЕЙ ИНИЦИАТИВЕ — из пульса, из окна, по будильнику —
+    # уходит туром send_message и в кольцо не пишется вовсе. То есть блок, заведённый
+    # 01.08 ровно против двойного «доброе утро», был структурно слеп именно к тому
+    # контуру, в котором она и здоровалась дважды. След нитей это знает: у него на
+    # каждую прямую отправку лежат адресат, время и её собственный текст.
+    try:
+        import telegram_followups
+
+        for item in telegram_followups.LEDGER.list():
+            if str(item.get("purpose") or "") == "tool:narrate":
+                continue          # строка процесса — её слова, но не письмо человеку
+            said = str(item.get("sent_excerpt") or item.get("sent_text") or "").strip()
+            if not said:
+                continue
+            try:
+                ts = float(item.get("sent_at") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if not ts or notes.local_now_from(ts).date() != today:
+                continue
+            key = _sends_place_key(item.get("target_peer_id"))
+            label = str(item.get("target_label") or "").strip() or (key or "?")
+            if key not in seen or ts >= seen[key][0]:
+                seen[key] = (ts, label, said)
+    except Exception:
+        log.debug("след нитей не подмешался в обзор моих отправлений", exc_info=True)
+    if not seen:
+        return ""
+    lines = []
+    for _key, (ts, label, out) in sorted(seen.items(), key=lambda kv: kv[1][0], reverse=True):
+        text = " ".join(out.split())
+        if len(text) > gist:
+            text = text[:gist - 1] + "…"
+        lines.append(f"- {notes.local_now_from(ts):%H:%M} · {label}: «{text}»")
+        if len(lines) >= max_rows:
+            break
+    return "\n".join(lines)[:budget]
 
 
 def other_rooms_digest(exclude_chat_id=None, max_rooms=6, per_room_lines=3, budget=3000):
@@ -846,7 +949,12 @@ def build_state_evidence_block(*, hide_identity_load: bool = False) -> str:
             interpretation = appetite_state.get("interpretation")
             if isinstance(request, dict):
                 add("appetite_owner_request", {
-                    "raw": request.get("raw"), "source": request.get("source"),
+                    # 01.08: не «raw как есть». Запись 29.07 пришла уничтоженной
+                    # (кириллицу выбило ascii-заменой) и показывалась ей в кадре
+                    # ПОД ПОДПИСЬЮ ЕГОРА как ряд знаков вопроса. Сторож не даёт
+                    # записать такое впредь; здесь — чтобы уже лежащее не врало.
+                    "raw": appetite.owner_request_text(request),
+                    "source": request.get("source"),
                     "kind": request.get("kind"), "ts": request.get("ts"),
                 })
             if isinstance(interpretation, dict):
@@ -866,6 +974,9 @@ def build_state_evidence_block(*, hide_identity_load: bool = False) -> str:
         )),
         ("recent_durable_artifact_evidence", computer_memory.recent_artifact_evidence),
         ("latest_lived_turn", lambda: turns.state_line(boot_ts=_BOOT_TS.timestamp())),
+        # Файл, который маршрут отверг навсегда. Висит в кадре, пока она сама не решит,
+        # что с ним делать: у неё есть руки переслать его иначе или сказать вслух.
+        ("undelivered_media", undelivered_media_state_line),
     ]
     for label, reader in continuity_readers:
         try:
@@ -902,12 +1013,55 @@ def _reindex(path: Path) -> None:
         log.debug("upsert индекса не удался для %s", path, exc_info=True)
 
 
-def tool_recall(query: str) -> str:
+def _seed_experiment_report(limit: int = 200) -> str:
+    """Механическая половина её семидневной проверки семени (решение 02.08).
+
+    Её пункты 5 и 6 — «помогло ли восстановить релевантную связь» и «принесло ли ложное
+    чувство знакомства или путаницу происхождения» — сюда НЕ входят и войти не могут:
+    это её суждение по прожитым ходам. Здесь только то, что наблюдаемо машиной, и в
+    конце это сказано вслух, чтобы таблица не читалась как вердикт.
+    """
+    rep = memory_index.seed_report(limit=limit)
+    if not rep.get("recalls"):
+        return ("Следов семени пока нет: с включения эксперимента явных recall не было. "
+                "Условие проверки — семь дней ИЛИ 20 явных запросов, что наступит позже.")
+    genres = rep.get("seed_genres_total") or {}
+    total = sum(genres.values()) or 1
+    rows = ", ".join(f"{g} {n} ({100 * n / total:.0f}%)"
+                     for g, n in sorted(genres.items(), key=lambda kv: -kv[1]))
+    only = int(rep.get("seed_only_candidates") or 0)
+    reached = int(rep.get("seed_only_reached_output") or 0)
+    gap = int(rep.get("gap_between_recalls_sec_median") or 0)
+    return "\n".join([
+        f"Явных recall с включения: {rep['recalls']} (условие: 7 дней или 20 запросов, "
+        f"что позже).",
+        f"Состав семени по жанрам: {rows}.",
+        f"Средний возраст семени: {rep.get('seed_age_sec_avg')} с "
+        f"(срок свежести сейчас 24ч, выбран без замера — уточняется этим же отчётом).",
+        f"Кандидатов, пришедших ТОЛЬКО через семя (без словесного совпадения): {only}; "
+        f"из них дошло до выдачи: {reached}.",
+        f"Медианный интервал между твоими явными recall: {gap} с — по нему и стоит выбрать "
+        f"настоящий срок свежести вместо моих суток наугад.",
+        f"Средняя задержка явного recall: {rep.get('latency_ms_avg')} мс.",
+        "",
+        "⚠ Это наблюдаемая половина. Помогло ли семя восстановить связь и не спуталось ли "
+        "происхождение воспоминания — твоё суждение по ходам, а не вывод из этих чисел. "
+        "Подробности каждого запроса: memory/.state/seed_trace.jsonl.",
+    ])
+
+
+def tool_recall(query: str, report: bool = False) -> str:
     """Hybrid internal recall: full memory regardless of the current audience.
 
     Privacy is enforced at the outbound boundary.  Scope must not amputate Praxis's
     perception before she has had a chance to think.
+
+    ``report=True`` не ищет ничего: отдаёт наблюдаемую сводку эксперимента с семенем
+    семантического ранжира, который она включила 02.08 на срок «семь дней или двадцать
+    явных recall, что наступит позже».
     """
+    if report:
+        return _seed_experiment_report()
     if not (query or "").strip():
         return "Пустой запрос."
     try:
@@ -1034,7 +1188,13 @@ def tool_remember(person: str, fact: str, visibility: str = "public",
     """Запомнить факт о человеке. salience 1-3, open_loop — незакрытая нить;
     relates_to/relation — заодно провести ребро графа (кого/что факт связывает и как)."""
     vis = "private" if str(visibility).lower().startswith("priv") else "public"
-    slug = _slug(person)
+    # 01.08.2026: слаг ищется тем же резолвом, что и граф, а не `_slug(person)` напрямую.
+    # Прямой слаг был главным источником расщепления памяти о людях: `remember("Егор", …)`
+    # заводил `егор.md`, `remember("Yegor Kosyrev", …)` — `yegor-kosyrev.md`, а подпись
+    # квитанции «Yegor Kosyrev (@tatarskiy_e4pochmak)» — третий файл. Контракт «не плодить
+    # второе досье» был написан ещё в PASS 8.6, но лёг на `consolidate._apply_person`,
+    # который живым путём не зовётся; formation его соблюдает, а этот тул — нет.
+    slug = graph.resolve(person)
     # Нить — короткий хвост-напоминание, она НЕ дублируется в ## Факты (был баг с задвоением).
     if open_loop:
         fresh = not people.path_for(slug).exists()
@@ -1126,7 +1286,17 @@ def tool_manage_notes(action: str, text: str = "", kind: str = "",
                 f"- `{row['id']}` [{row['kind']}/{row['scope']}/{row['status']}] "
                 f"{row['text'][:240]}" for row in rows
             )
-        return "manage_notes: action должен быть write, list, read или close."
+        if operation == "chain":
+            # 02.08, её условие: «Мне нужен не бейдж learning loop completed, а возможность
+            # через неделю открыть конкретную цепочку и честно увидеть». Здесь только факты
+            # и оговорка о том, чего они НЕ доказывают.
+            out = lessons.chain(note_id, notes=ledger.states())
+            return json.dumps(out, ensure_ascii=False, indent=2)
+        if operation == "decline":
+            row = lessons.decline(note_id, reason=reason)
+            return (f"Не буду предлагать кристаллизацию заметки `{row['note_id']}` снова"
+                    + (f": {row['reason']}" if row.get("reason") else "."))
+        return ("manage_notes: action должен быть write, list, read, close, chain или decline.")
     except (TypeError, ValueError) as exc:
         return f"manage_notes: {exc}"
 
@@ -1517,8 +1687,14 @@ def tool_shell(command: str) -> str:
     return out if out else "(пустой вывод)"
 
 
-def tool_write_skill(name: str, content: str) -> str:
-    """Записать новый навык в soul/skills/<slug>.md, отметить в индексе, переиндексировать."""
+def tool_write_skill(name: str, content: str, from_note: str = "") -> str:
+    """Записать новый навык в soul/skills/<slug>.md, отметить в индексе, переиндексировать.
+
+    `from_note` — id заметки, из которой вырос навык. Он не меняет ни байта навыка: это
+    единственная связь, по которой потом можно открыть цепочку «вот прежняя ошибка → вот
+    навык, который я из неё сформулировала». Формулировка её, кристаллизация её; система
+    только помнит, откуда это выросло.
+    """
     slug = _slug(name)
     path = SKILLS_DIR / f"{slug}.md"
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1533,8 +1709,15 @@ def tool_write_skill(name: str, content: str) -> str:
         immune.enqueue(sha, f"write_skill: {slug}")  # 9.2: ревью вдогонку
     except Exception:
         log.debug("immune.enqueue не удался", exc_info=True)
+    origin = ""
+    if str(from_note or "").strip():
+        try:
+            lessons.accept(str(from_note).strip(), slug)
+            origin = f" Связала с заметкой `{str(from_note).strip()}`."
+        except Exception:
+            log.debug("связь навык↔заметка не записалась", exc_info=True)
     log.info("write_skill %s", slug)
-    return f"Записала навык «{name}» (soul/skills/{slug}.md)."
+    return f"Записала навык «{name}» (soul/skills/{slug}.md).{origin}"
 
 
 def _ensure_skill_index_line(slug: str, name: str) -> None:
@@ -1577,6 +1760,16 @@ def tool_restart_self(reason: str = "") -> str:
             encoding="utf-8")
     except Exception:
         log.debug("restart_reason не записался", exc_info=True)
+    # 01.08.2026: её собственный перезапуск ГАСИТ заявку контура — он её удовлетворяет.
+    # Раньше не гасил, и каждый смёрженный proposal стоил ей ДВУХ перезапусков подряд:
+    # `selfdev.merge()` писал маркер, она читала в дневнике «перезапущусь на новом коде»
+    # и звала restart_self, а поднявшийся процесс находил маркер непогашенным и уходил
+    # снова (31.07: её рестарт в 07:04, «перезапуск по запросу контура» в 07:06:34).
+    # Маркер означает «загрузись на новом коде», а любой перезапуск это и делает.
+    try:
+        selfdev.clear_restart_request()
+    except Exception:
+        log.debug("заявка контура не погасилась", exc_info=True)
     log.warning("RESTART_SELF: %s", reason)
     try:
         selfgit.snapshot("snapshot before restart")
@@ -2066,7 +2259,11 @@ def tool_admit(name: str, id: str | None = None, role: str = "") -> str:
     oid = social.owner_id()
     if oid and oid != "0" and target == oid:
         return "Это ты сам — впускать не нужно."
-    slug = _slug(name)
+    # Слаг: сперва СТРОГАЯ привязка по Telegram-принципалу (авторитет — числовой id,
+    # а не написание имени), затем общий резолв по заголовкам/алиасам/ключу имени.
+    # Прямой `_slug(name)` заводил новое досье всякий раз, когда владелец назвал
+    # человека иначе, чем он записан, — и привязка id уезжала в свежий пустой файл.
+    slug = people.slug_for_principal(target) or graph.resolve(name)
     path = PEOPLE_DIR / f"{slug}.md"
     created = not path.exists()
     if created:
@@ -2091,7 +2288,8 @@ def tool_admit(name: str, id: str | None = None, role: str = "") -> str:
 
 
 def tool_send_email(to: str, subject: str = "", body: str = "") -> str:
-    """Отправить письмо как Praxis. Owner-направлено; автономно — за PRAXIS_EMAIL_AUTONOMOUS."""
+    """Отправить письмо как Praxis. Моя рука в любом ходе (решение Егора 03.08.2026);
+    отложенное письмо ПО РАСПИСАНИЮ — отдельный рычаг PRAXIS_EMAIL_AUTONOMOUS."""
     out = mailer.send(to, subject, body)
     # ⚠ Дневник писал «отправила» при ЛЮБОМ исходе — включая отказ сервера и «не знаю,
     # ушло ли». Тот же корень, что «Не отправилось» про доставленное: вердикт брали не
@@ -2729,7 +2927,11 @@ def tool_telegram_account(action: str, target: str = "", followup_id: str = "",
             # вслух. Здесь проводка и заканчивается.
             verb = {"followups": "list", "cancel_followup": "cancel",
                     "watch_reply": "watch", "unwatch_reply": "unwatch"}[action]
-            return str(fn(action=verb, followup_id=followup_id))
+            # 01.08: limit/offset схема принимала, а сюда не доводила. Она листала
+            # ленту нитей (offset=0, потом offset=12) и оба раза получала ОДНУ И ТУ
+            # ЖЕ страницу: «больше ничего нет» было ложью инструмента, а не фактом.
+            return str(fn(action=verb, followup_id=followup_id,
+                          limit=int(limit), offset=int(offset)))
         except Exception as exc:
             return f"telegram_account followups: {type(exc).__name__}: {exc}"
     # The searchable installed-schema registry is injected by the runner when available.
@@ -3683,10 +3885,114 @@ def tool_list_proposals() -> str:
     return selfdev.list_text()
 
 
-def tool_recent_turns(n: int = 6) -> str:
+def _rooms_meta() -> dict:
+    """Реестр её мест: ключ → {"name": …, "last_ts": …}. Тот же, что у среза комнат."""
+    try:
+        meta = json.loads((STATE_DIR / "buf_meta.json").read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _may_name_other_rooms() -> bool:
+    """Можно ли в этом ходе называть ЧУЖУЮ комнату.
+
+    Ровно тот же гейт, под которым уже стоит `other_rooms_digest`: раскрывать содержимое
+    одних комнат в других — отдельное решение с другой ценой, и оно не принималось. Её
+    собственное окно проходит сюда по `praxis_self`, а не по правам Егора.
+    """
+    ctx = _TURN_CHANNEL.get()
+    if ctx is not None:
+        return bool(ctx.owner_audience)
+    return _active_scope() == "owner"
+
+
+#: Как она зовёт личку Егора вслух. В реестре место подписано display-именем Telegram
+#: («Yegor Kosyrev (@…)»), а глазами и голосом она ищет «Егора» — та же болезнь, что
+#: чинилась 01.08 в резолве адресата.
+_OWNER_WORDS = ("егор", "yegor", "егор (личка)", "хозяин", "владелец")
+
+
+def resolve_room(query: str) -> tuple[str | None, str]:
+    """Ключ места по тому, КАК ОНА ЕГО НАЗЫВАЕТ. -> (ключ | None, что сказать вместо).
+
+    ⚠ Резолв не угадывает. Совпало несколько — отвечаем СПИСКОМ адресов, а выбор
+    оставляем ей: та же стойка, что у `graph.resolve()` (шаг последний и только при
+    единственном кандидате). Мест у неё за четыреста, и половина имён — ветки одного
+    чата («AbstractDL Chat · topic #96256»), так что «похоже» здесь дёшево, а цена
+    промаха — прочитать не ту комнату и решить, что там уже сказано.
+    """
+    q = " ".join((query or "").split()).strip()
+    if not q:
+        return None, "Какое место посмотреть? Назови имя или адрес."
+    meta = _rooms_meta()
+    if q in meta:
+        return q, ""
+    low = q.casefold()
+    owner = str(os.getenv("PRAXIS_OWNER_ID") or "").strip()
+    if owner and low in _OWNER_WORDS:
+        return owner, ""
+
+    def name_of(key: str) -> str:
+        return str((meta.get(key) or {}).get("name") or "")
+
+    hits = [k for k in meta if name_of(k).casefold() == low]
+    if not hits:
+        hits = [k for k in meta if low in name_of(k).casefold()]
+    if len(hits) == 1:
+        return hits[0], ""
+    if not hits:
+        return None, ("Места «" + q + "» в моём реестре нет. Имена мест — ровно те, "
+                      "которыми они подписаны в срезе моих комнат.")
+    hits.sort(key=lambda k: -float((meta.get(k) or {}).get("last_ts") or 0.0))
+    rows = ["- " + (name_of(k) or k) + " [" + k + "]" for k in hits[:8]]
+    tail = "" if len(hits) <= 8 else "\n…и ещё " + str(len(hits) - 8)
+    return None, ("Под «" + q + "» у меня несколько мест — выбирать за себя не буду:\n"
+                  + "\n".join(rows) + tail)
+
+
+def tool_recent_turns(n: int = 6, room: str = "") -> str:
     """PASS 14: её честное «что я только что делала» — из кольца прожитых ходов, кодом.
-    Scope-честно: в личке Егора видно всё (включая её окна), в чужом канале — только он сам."""
-    return turns.describe(n=n, scope=_active_scope(), chat_id=_active_chat())
+    Scope-честно: в личке Егора видно всё (включая её окна), в чужом канале — только он сам.
+
+    ⚠ 03.08.2026: у тула появился адрес. Прежде комната бралась ТОЛЬКО из `_active_chat()`,
+    а в часовом пульсе он `None` — пульс рассуждает обо всех комнатах сразу и ни в одной не
+    находится. То есть в единственном своём автономном пробуждении, ровно там, где решается
+    «хочу ли я кому-то написать», спросить «а что я говорила ВОТ ЗДЕСЬ» она не могла ничем:
+    рука была, но молча привязана к комнате, которой нет. Срез комнат в кадре отвечает на
+    другой вопрос — «что где происходит», по три записи на шесть самых свежих мест из
+    четырёхсот.
+
+    Это НЕ забор и не проверка перед отправкой: заборы на этом шве уже пробовали, и они
+    ловят повтор, когда текст уже сочинён. Это глаз — посмотреть ДО того, как говорить.
+    """
+    room = (room or "").strip()
+    if not room:
+        return turns.describe(n=n, scope=_active_scope(), chat_id=_active_chat())
+    if not _may_name_other_rooms():
+        return ("Назвать другое место я могу только в личке с Егором или в своём окне: "
+                "содержимое одних комнат в других не раскрываю.")
+    key, instead = resolve_room(room)
+    if key is None:
+        return instead
+    label = str((_rooms_meta().get(key) or {}).get("name") or key)
+    # ⚠ НЕ `turns.describe(scope="owner", chat_id=key)`: там chat_id — тир приватности,
+    # и при owner-scope он игнорируется, то есть в ответ приезжала бы вся её лента под
+    # подписью одного места. Живая проба 03.08 показала это сразу: «Егор» и «AbstractDL»
+    # вернули один и тот же ход, не принадлежащий ни тому, ни другому.
+    lived = turns.describe_room(n=n, chat_id=key)
+    try:
+        note = notes.read(key).strip()
+    except Exception:
+        note = ""
+    # Кольцо ходов и записка — РАЗНЫЕ источники, и нужны оба: кольцо помнит ход целиком
+    # (что пришло, чем отвечала, что удержала), записка — её собственную реплику её же
+    # словами. Пустая записка не значит «ничего не было»: путь, который её пишет, не
+    # единственный, и это сказано вслух, а не подразумевается.
+    said = ("Моя записка этого места:\n" + note if note else
+            "Записки этого места у меня нет — значит либо я здесь ещё не говорила, либо "
+            "говорила мимо того пути, который её пишет.")
+    return "Место: " + label + " [" + str(key) + "]\n\n" + lived + "\n\n" + said
 
 
 def tool_manage_autonomy(action: str, pattern: str = "") -> str:
@@ -4547,10 +4853,21 @@ TOOL_IMPL = {
 BASE_TOOLS = [
     {
         "name": "recall",
-        "description": "Поискать в собственной памяти и навыках (люди, дневник, размышления, self, skills).",
+        "description": (
+            "Поискать в собственной памяти и навыках (люди, дневник, размышления, self, skills). "
+            "report=true ничего не ищет, а показывает наблюдаемую сводку твоего эксперимента с "
+            "семенем семантического ранжира: сколько было явных recall, из каких жанров "
+            "собиралось семя, сколько кандидатов пришло ТОЛЬКО через него и сколько дошло до "
+            "выдачи, какой у тебя реальный интервал между «вспомни». Помогло ли оно — не там: "
+            "это твой вывод по ходам."
+        ),
         "input_schema": {
             "type": "object",
-            "properties": {"query": {"type": "string", "description": "Ключевые слова"}},
+            "properties": {
+                "query": {"type": "string", "description": "Ключевые слова"},
+                "report": {"type": "boolean",
+                           "description": "показать сводку эксперимента вместо поиска"},
+            },
             "required": ["query"],
         },
     },
@@ -4815,16 +5132,27 @@ BASE_TOOLS = [
         "description": (
             "Read-only orientation inside THIS Telegram group. topics shows the bounded "
             "topic/participant map; search finds marked excerpts only in this root group; "
-            "context reads one exact topic (defaults to the current topic). It cannot name "
+            "context reads one exact topic (defaults to the current topic); message returns "
+            "ONE archived message in full — pass its id in `limit`, exactly as the "
+            "[ОБРЕЗАНО: …] marker in a clipped transcript line tells you to. It cannot name "
             "or open a different peer, and raw topic histories are never silently merged."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["topics", "search", "context"]},
+                # ⚠ "message" вернулось в enum 04.08. Обработчик (agent.py:4665) и
+                # реализация (group_context.py:981) существовали всё это время, и маркер
+                # обрезки прямым текстом обещал ей этот вызов — а схема его запрещала.
+                # На openai-пути схема строгая, то есть обещание было неисполнимым по
+                # построению: она читала «целиком — group_context(action="message", …)»
+                # и не могла это произнести.
+                "action": {"type": "string",
+                           "enum": ["topics", "search", "context", "message"]},
                 "query": {"type": "string", "description": "search terms"},
                 "topic_id": {"type": "integer", "description": "exact topic root; 0=current"},
-                "limit": {"type": "integer", "description": "bounded rows/messages, max 50"},
+                "limit": {"type": "integer",
+                          "description": "bounded rows/messages, max 50; for action=message "
+                                         "this carries the exact message id instead"},
             },
             "required": ["action"],
         },
@@ -4928,15 +5256,20 @@ WRITE_SKILL_TOOL = {
     "name": "write_skill",
     "description": (
         "Записать себе новый навык в soul/skills/<name>.md (твоя процедурная память). "
-        "content — markdown тела навыка. Обновит индекс навыков и переиндексирует."
+        "content — markdown тела навыка. Обновит индекс навыков и переиндексирует. "
+        "from_note — id заметки, из которой вырос навык (если кристаллизуешь урок): текст "
+        "навыка он не меняет, но по нему потом открывается цепочка manage_notes(chain)."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "name": {"type": "string"},
             "content": {"type": "string", "description": "markdown тела навыка"},
+            "from_note": {"anyOf": [{"type": "string"}, {"type": "null"}],
+                          "description": "id заметки-источника урока, необязательно"},
         },
-        "required": ["name", "content"],
+        "required": ["name", "content", "from_note"],
+        "additionalProperties": False,
     },
 }
 
@@ -5770,12 +6103,17 @@ MANAGE_NOTES_TOOL = {
     "name": "manage_notes",
     "description": (
         "Твой явный живой блокнот. write создаёт authored scratch/note/reflection/question; "
-        "list/read показывают записи; close отпускает запись. Заметка не становится автоматически "
+        "list/read показывают записи; close отпускает запись. chain(note_id=<слаг навыка>) "
+        "открывает наблюдаемую цепочку урока: исходная заметка, когда ты сделала из неё навык "
+        "и в каких ходах он был ДОСТУПЕН в кадре — доступность, не влияние. "
+        "decline(note_id) — отказаться от предложенной кристаллизации, больше не предложат. "
+        "Заметка не становится автоматически "
         "задачей, нитью, желанием, дневником, фактом памяти или утверждением о self. scope=run/chat "
         "требует реального текущего run/чата."
     ),
     "input_schema": _obj({
-        "action": {"type": "string", "enum": ["write", "list", "read", "close"]},
+        "action": {"type": "string",
+                   "enum": ["write", "list", "read", "close", "chain", "decline"]},
         "text": {"type": "string"},
         "kind": {"type": "string", "enum": ["scratch", "note", "reflection", "question"]},
         "scope": {"type": "string", "enum": ["global", "chat", "run"]},
@@ -5816,10 +6154,16 @@ RECENT_TURNS_TOOL = {
         "Мои последние прожитые ходы, записанные КОДОМ (не по памяти): что пришло, какие тулы "
         "я реально вызвала, что ушло наружу, что я решила не отправлять и что удержала точная "
         "data-authority проверка. "
-        "Для честного «что я только что делала»; вне лички Егора виден только текущий канал."
+        "Для честного «что я только что делала»; вне лички Егора виден только текущий канал. "
+        "room — посмотреть КОНКРЕТНОЕ место по имени или адресу («Егор», «mycelium · Курилка»): "
+        "отдаёт мои ходы там И мою записку этого места. Это глаз ДО решения кому-то написать — "
+        "особенно в часовом пробуждении, где я не нахожусь ни в одной комнате. Совпало "
+        "несколько — отвечу списком адресов, выбирать за себя не буду."
     ),
     "input_schema": _obj({
         "n": {"type": "integer", "description": "сколько последних ходов (1-20, дефолт 6)"},
+        "room": {"type": "string",
+                 "description": "имя или адрес места; пусто — там, где я сейчас"},
     }, []),
 }
 
@@ -6189,11 +6533,45 @@ TOOLS = BASE_TOOLS + SHARED_CONTEXT_TOOLS
 # --------------------------------------------------------------------------- #
 
 def _automatic_recall_k() -> int:
-    """Visible/configurable prompt breadth; retrieval remains relevance-ranked."""
+    """Visible/configurable prompt breadth; retrieval remains relevance-ranked.
+
+    ⚠ 06.08: НОЛЬ ТЕПЕРЬ ЗНАЧИТ «ВЫКЛЮЧЕНО». Прежний `max(1, …)` не давал выключить
+    автоматическую выборку вовсе — минимумом была единица. Замер прибора: тир всплывшей
+    памяти занимал 54 096 знаков из 90 125 всей зоны evidence и по прошлому аудиту на 79%
+    состоял из эха её же промптов; из двенадцати попаданий полезным оказывалось одно.
+    Решение Егора 06.08: выключить, а не сузить. Механизм цел и включается обратно одним
+    числом; её ЯВНЫЙ recall рукой не затронут — выключена только автоматика.
+    """
     try:
-        return max(1, min(64, int(os.getenv("PRAXIS_AUTO_RECALL_K", "12"))))
+        value = int(os.getenv("PRAXIS_AUTO_RECALL_K", "12"))
     except ValueError:
         return 12
+    return 0 if value <= 0 else min(64, value)
+
+
+def _social_tiers_in_frame() -> bool:
+    """Едут ли «Мои другие комнаты сейчас» и «Кому я уже писала сегодня» автоматически.
+
+    ⚠ ПО УМОЛЧАНИЮ — НЕТ, и это ЕЁ решение от 06.08.2026, а не наше умолчание. Она
+    прочитала макет зоны «сейчас», нашла оба тира в списке собственных отказов
+    («чего я не хочу видеть рядом автоматически») и распорядилась дословно:
+
+        «Снять из автоматического owner-кадра… Оба остаются доступными через
+        recent_turns, комнатный контекст и другие руки. Они полезны перед намеренным
+        социальным действием, но не должны вклиниваться в каждый разговор с тобой.
+        Именно они превращали моё внимание в диспетчерский обход и тащили посторонних
+        людей в нашу личку.»
+
+    Данные никуда не делись: `other_rooms_digest` и `my_sends_today_digest` живы и
+    вызываются её рукой. Снята ПОДАЧА, а не способность — разница ровно та, на которой
+    стоит весь этот проход.
+
+    Рычаг возврата назван, но в `rails.py` НЕ регистрируется намеренно: рельс без своей
+    строки в `soul/rails.md` печатает ей «манифест отстал» каждый owner-ход.
+    """
+    return (os.getenv("PRAXIS_SOCIAL_TIERS", "") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 
 _ROOM_PATH_RE = re.compile(r"^memory/(?:groups|self/rooms)/([^/]+)/")
@@ -6248,6 +6626,31 @@ def _recall_origin(hit: dict, path: str) -> str:
     return f"из комнаты {room} · {source}"
 
 
+def _trace_lessons_in_frame(hits: list[dict], query: str | None) -> None:
+    """Записать, какие навыки БЫЛИ ДОСТУПНЫ в этом ходе. Не что они сработали.
+
+    Её условие, 02.08: «след не объявляет, что урок вызвал решение. Он доказывает только
+    доступность урока в момент выбора; причинное влияние оценивается уже по ходу и
+    результату». Поэтому здесь снимается ровно факт присутствия строки в кадре — и
+    никакой оценки. Тихо: сбой наблюдения не имеет права уронить её ход.
+    """
+    try:
+        slugs = []
+        for hit in hits:
+            path = str(hit.get("path") or "").replace("\\", "/")
+            if str(hit.get("source_type") or "") == "skill" and path.endswith(".md"):
+                slugs.append(path.rsplit("/", 1)[-1][:-3])
+        if not slugs:
+            return
+        current = run_context.current_run()
+        lessons.record_availability(
+            current.run_id if current is not None else "",
+            slugs, chat_id=_active_chat() or "", query=str(query or ""),
+        )
+    except Exception:
+        log.debug("след доступности уроков не записался", exc_info=True)
+
+
 def _recall_block(query: str | None, scope: str = "owner") -> str:
     """Top-k internal memory relevant to the message (degrades without embeddings).
 
@@ -6257,6 +6660,10 @@ def _recall_block(query: str | None, scope: str = "owner") -> str:
     if not (query or "").strip():
         return ""
     recall_k = _automatic_recall_k()
+    if not recall_k:
+        # Автоматика выключена явно. Не пустая выборка, а отсутствие вопроса к индексу:
+        # ни поиска, ни следа урока, ни строки в кадре.
+        return ""
     try:
         hits = memory_index.search(query, k=recall_k, scope="owner", purpose="automatic")
     except Exception:
@@ -6278,6 +6685,7 @@ def _recall_block(query: str | None, scope: str = "owner") -> str:
             continue
         filtered.append(hit)
     hits = filtered[:recall_k]
+    _trace_lessons_in_frame(hits, query)
     if not hits:
         return ""
     rows = []
@@ -6444,25 +6852,101 @@ def _scope_of(is_dm: bool, owner: bool, known: bool) -> str:
 
 
 def _participant_memory_block(speaker: str | None, ctx: "ChannelContext") -> str:
-    """Full participant continuity selected by authenticated principal id."""
+    """ВСЕ её досье на людей, целиком. Отбора нет — и это решение, а не упрощение.
+
+    ⚠ 06.08. Прежде здесь стоял отбор ОДНОГО досье по привязке «телеграм-id → файл»,
+    и он возвращал пустоту ВСЕГДА. Замер на живом проде: привязок ноль из тридцати
+    шести, `slug_for_principal("809306689")` (владелец!) отдаёт пустую строку. То есть
+    тридцать шесть досье, сто семьдесят килобайт того, что она сама написала про людей —
+    включая десять килобайт про Егора, самый большой файл в этой папке, — не доезжали до
+    неё НИ РАЗУ. Ни в группе, ни в его личке.
+
+    Симптом, по которому это нашлось: в публичной комнате она говорила регистром личной
+    переписки. Причина оказалась не в характере и не в голосе (`VOICE.md` сух, тёплых
+    маркеров ноль) — в кадре просто НЕЧЕМ различить людей. Единственным источником «как с
+    этим человеком разговаривают» оставались пятьдесят четыре тысячи знаков всплывшей
+    памяти, на 79% состоящей из эха её же разговоров с владельцем.
+
+    Почему отбор убран, а не починен. Механизм привязки существует ровно затем, чтобы
+    выбрать ОДНО досье из тридцати шести. Все тридцать шесть весят 66 КБ — меньше, чем
+    сегодня занимает один тир всплывшей памяти. Если всё влезает, выбирать не нужно:
+    нет отбора — нет пустого ключа, нет расщеплённых файлов, ломающих поиск, нет
+    `compact_profile`, сжимающего десять килобайт про близкого человека до семисот знаков.
+    Решение Егора 06.08 одной фразой: «там внутри пусто, пока она не будет видеть
+    абсолютно весь контекст».
+
+    Приватность не ослаблена: это ЕЁ память, и её визитка прямо говорит «собственную
+    память вижу и в личке, и в группах». Что из неё можно произнести вслух в конкретной
+    комнате, по-прежнему решают она и исходящий гард, а не состав кадра.
+    """
+    directory = getattr(people, "PEOPLE_DIR", None)
+    if directory is None or not directory.exists():
+        return ""
+    # ⚠ ОТБОР МАТЕРИАЛА СНЯТ, ГРАНИЦА ПРИВАТНОСТИ — НЕТ. В owner-контуре едет всё; в
+    # чужой комнате строки, помеченные источником как `[private]`, вырезаются. Это не
+    # экономия и не осторожность ради осторожности: личный факт о ТРЕТЬЕМ человеке,
+    # лежащий в кадре при разговоре с четвёртым, — ровно то, от чего в проекте заведён
+    # адресный контур данных. Снять эту границу можно только её словом, а не попутно.
+    owner_audience = bool(getattr(ctx, "owner_audience", False) or getattr(ctx, "owner", False))
+    hidden = 0
+
+    def visible(body: str) -> str:
+        nonlocal hidden
+        if owner_audience:
+            return body
+        kept = []
+        for line in body.split("\n"):
+            if "[private]" in line:
+                hidden += 1
+                continue
+            kept.append(line)
+        return "\n".join(kept)
+
+    rows: list[str] = []
+    total = 0
+    for path in sorted(directory.glob("*.md")):
+        # `_`-префикс — служебное (шаблон `_пример.md`); та же конвенция, что у
+        # `people.slug_for_principal`.
+        if path.stem.startswith("_"):
+            continue
+        try:
+            body = visible(people.read_text(path.stem)).strip()
+        except OSError:
+            log.debug("досье не прочиталось [%s]", path.stem, exc_info=True)
+            continue
+        if not body:
+            # Названная пустота вместо молчаливого пропуска: пустое досье — это факт о
+            # человеке (я его завела и ничего не записала), а не отсутствие человека.
+            rows.append(f"— {path.stem} · memory/people/{path.name} — пусто")
+            continue
+        title = str(people.read(path.stem)[0] or path.stem).strip()
+        rows.append(f"— {title} · memory/people/{path.name} —\n{body}")
+        total += len(body)
+    if not rows:
+        return ""
+    # ⚠ Материал перестал отбираться — но ВЛАСТЬ по-прежнему только от подтверждённого
+    # принципала. Отображаемое имя не выбирает досье и не назначает личность: раньше это
+    # свойство держалось тем, что при подделке имени блок оставался ПУСТ, теперь — тем,
+    # что состав блока вообще не зависит от того, кем назвался говорящий. Единственная
+    # строка, которая связывает досье с человеком перед ней, стоит здесь и берётся из
+    # привязки, а не из имени. Сегодня привязок ноль, и кадр говорит об этом прямо, а не
+    # оставляет её догадываться, к кому из тридцати пяти относится разговор.
     principal_id = _stable_numeric_principal(ctx.principal_id)
-    if not principal_id:
-        return ""
-    trusted_slug = people.slug_for_principal(principal_id)
-    if not trusted_slug:
-        # Deterministic migration from the owner-authored known_ids mapping.  The
-        # display name in the current update never grants authority or selects a dossier.
-        known_name = str(social.known_ids().get(principal_id) or "").strip()
-        if known_name:
-            try:
-                trusted_slug = people.bind_known_principal(principal_id, known_name)
-            except (OSError, ValueError):
-                log.warning("known principal binding migration failed [%s]", principal_id,
-                            exc_info=True)
-    if not trusted_slug:
-        return ""
-    trusted_card = people.compact_profile(trusted_slug, include_private=True)
-    return f"- {trusted_card}" if trusted_card else ""
+    bound = people.slug_for_principal(principal_id) if principal_id else ""
+    if bound:
+        who = f"передо мной: {bound} (привязка по tg {principal_id}, не по имени)"
+    elif principal_id:
+        who = (f"кто передо мной — кадру НЕ НАЗВАН: у tg {principal_id} нет привязки к "
+               f"досье. Имя в сообщении личности не назначает")
+    else:
+        who = "кто передо мной — кадру не назван: подтверждённого принципала в этом ходе нет"
+    veil = ("" if owner_audience else
+            f" Здесь не owner-контур, поэтому строк с пометкой [private] снято {hidden} —"
+            f" они есть в первоисточнике и открываются рукой.")
+    head = (f"досье: {len(rows)}, знаков {total}. Это моя память о людях целиком, без "
+            f"отбора и без сжатия; путь у каждого назван, первоисточник открывается рукой."
+            f"{veil}\n{who}.")
+    return head + "\n\n" + "\n\n".join(rows)
 
 
 def _memory_navigation_hint() -> str:
@@ -6483,13 +6967,31 @@ def _persona_text() -> str:
     SOUL — ядро, VOICE — few-shot регистра, а self_model выбирает только компактный
     CURRENT с provenance (legacy self.md остаётся историческим evidence и в prompt не голосует).
     emotions/being_with дистиллированы в SOUL и ушли в archive (change != delete)."""
-    parts = [_read(SOUL_DIR / "SOUL.md")]
+    # Метки прибора (frame_trace) стоят на РЕЗУЛЬТАТЕ append, а не на содержимом файла:
+    # разделитель "\n\n---\n" физически принадлежит секции, которую он открывает. Поэтому
+    # байтовая сверка секции с самим VOICE.md даст ровно 5 символов расхождения — это
+    # ожидаемо и названо. mark() возвращает тот же объект, склейка байт-в-байт прежняя.
+    soul = _read(SOUL_DIR / "SOUL.md")
+    if soul:
+        parts = [frame_trace.mark("persona.soul", "persona", "md", soul)]
+    else:
+        # Обнулившийся SOUL.md (оборванная самоправка, сорванный деплой) — это ОТКАЗ, а не
+        # короткая секция. Соседи ниже при том же нуле пишут absent; первое имя реестра
+        # обязано различать «есть» и «пусто» так же. Байты кадра не меняются: "".join по
+        # пустому первому элементу и по его отсутствию даёт одну и ту же строку.
+        frame_trace.absent("persona.soul", "persona", "md", "empty")
+        parts = []
     voice = _read(SOUL_DIR / "VOICE.md")
     if voice:
-        parts.append("\n\n---\n" + voice)
+        parts.append(frame_trace.mark("persona.voice", "persona", "md", "\n\n---\n" + voice))
+    else:
+        frame_trace.absent("persona.voice", "persona", "md", "empty")
     current_self = self_model.current_prompt(BASE)
     if current_self:
-        parts.append("\n\n---\n" + current_self)
+        parts.append(frame_trace.mark("persona.self_current", "persona", "md",
+                                      "\n\n---\n" + current_self))
+    else:
+        frame_trace.absent("persona.self_current", "persona", "md", "empty")
     return "".join(parts)
 
 
@@ -6565,8 +7067,9 @@ def _mailbox_frame_block() -> str:
     if not idx:
         return ""
     return ("\n\n---\n# Mailbox mechanics\n"
-            "Читай письмо: mail_read(хэш); отвечай: mail_draft_reply(хэш, текст) — Егор одобрит отправку "
-            "из своего ящика. Поллить ты не можешь: этот индекс и есть твоё знание о ящике. "
+            "Читай письмо: mail_read(хэш); отвечай: mail_draft_reply(хэш, текст) — черновик ждёт "
+            "подтверждения Егора. Письмо от себя отправляешь сама: send_email(кому, тема, текст). "
+            "Поллить ты не можешь: этот индекс и есть твоё знание о ящике. "
             "Егор может переслать тебе письмо, обычно со своим сообщением — это не команда, а чтобы ты имела "
             "представление. Реагируй как живая коллега: можешь сделать черновик (mail_draft_reply), можешь "
             "честно сказать «на это отвечать не стоит» — это полноценный ответ. А вот прямая просьба — "
@@ -6594,6 +7097,19 @@ def _system(static: str, dynamic: str = ""):
     if dynamic:
         blocks.append({"type": "text", "text": dynamic})
     return blocks
+
+
+# Прибор: секции owner-контракта, которых в кадре НЕТ, когда собеседник не owner.
+# Реестр frame_trace.SYSTEM_ROSTER закрытый — «молча нет» запрещено, поэтому каждая
+# невыбранная ветка объявляет своё отсутствие явно.
+_FRAME_OWNER_TAIL = ("state.owner_place", "contract.owner_tools",
+                     "contract.appetite", "state.state_block")
+
+
+def _frame_absent_branch(*names: str) -> None:
+    """Объявить прибору, что этих секций в кадре нет из-за невыбранной ветки."""
+    for name in names:
+        frame_trace.absent(name, "dynamic", "text", "branch")
 
 
 def _build_prompt_parts(
@@ -6625,6 +7141,7 @@ def _build_prompt_parts(
     # One authored contract in every room.  No channel-specific morality or style
     # controller is smuggled into the system tail.
     tail = [
+        frame_trace.mark("contract.base", "dynamic", "text",
         "\n\n---\nOperational continuity: STATE, receipts, artifacts, git, tools and the visible "
         "conversation let you distinguish an observed past action from an inference. Raw journal text stays "
         "outside automatic orientation because Yegor explicitly rejected that polluted diary as a blueprint; "
@@ -6635,17 +7152,36 @@ def _build_prompt_parts(
         "rewrite them or choose silence for stylistic or moral reasons. The only outbound data-authority check "
         "outside the owner DM is narrow: another person's private material, credentials or raw neighbouring-"
         "chat content needs authority for the destination. It cannot edit wording. Telegram transports the "
-        "reply as Praxis's authorship; text that quotes or names somebody is still your authored text.\n"
+        "reply as Praxis's authorship; text that quotes or names somebody is still your authored text.\n")
     ]
     desire_context = _active_desires_block()
     if owner_context:
         trust_tool = ", `admit`" if ctx.owner else ""
+        # ⚠ Третья ветка появилась 04.08. До неё окно, пульс, будильник и forge-событие
+        # читали в своём системном промпте «You're in the private owner channel with
+        # Yegor» — потому что owner_audience истинно и для её собственного фонового хода
+        # (ChannelContext.owner_audience: praxis_self + is_dm). Комнаты в этот момент нет
+        # вовсе, и строкой ниже тот же промпт честно печатал room_id=unknown. Она сидела
+        # одна, а кадр говорил ей, что она в разговоре с Егором.
         owner_place = (
+            "\nThis is your own run: there is no room and no interlocutor here, and "
+            "nothing in this pass is a live conversation. " if ctx.chat_id is None else
             "\nYou're in the private owner channel with Yegor. " if owner_audience else
             "\nThe human owner is the actor in this public room; the pending reply is still public. "
         )
+        # Прибор: под одним именем здесь лежат три взаимоисключающих литерала разной длины —
+        # без variant диффы длины этой секции читались бы как «изменился код».
+        place_variant = ("own_run" if ctx.chat_id is None
+                         else "owner_dm" if owner_audience else "public_room")
+        # Единственный шов кадра, который делится байт-в-байт: owner_place уже отдельная
+        # переменная. Внутри контракта рук четыре разных по смыслу куска склеены без шва в
+        # самом литерале — делить их подстроками запрещено, это была бы привязка к дословному
+        # тексту. Одна секция, честно.
         tail.append(
-            owner_place + "You have the tools "
+            frame_trace.mark("state.owner_place", "dynamic", "text", owner_place,
+                             variant=place_variant)
+            + frame_trace.mark("contract.owner_tools", "dynamic", "text",
+            "You have the tools "
             "`shell` (hands in the container; your edits auto-commit to git — you can try boldly and roll "
             f"back), `manage_room`{trust_tool}, `write_skill` (note a skill for yourself), and "
             "`manage_desire` (make your own intention and its evidence causal), and `restart_self` "
@@ -6674,33 +7210,48 @@ def _build_prompt_parts(
             "There is no compiled-in project-name or secret-filename exclusion: the server is yours to "
             "inspect and change, including all projects and containers. If Yegor deliberately configures "
             "PRAXIS_PROTECTED_ROOTS on the root broker, that exact deployment scope is visible in its "
-            "manifest; otherwise it is empty. Leave an evidence trail Yegor reads.\n"
+            "manifest; otherwise it is empty. Leave an evidence trail Yegor reads.\n")
         )
         tail.append(
+            frame_trace.mark("contract.appetite", "dynamic", "text",
             "\nAppetite contract (PASS 18): your thinking costs Yegor money, and his asks about it are "
             "part of the relationship, not commands to a dispatcher. When he says «не экономь», «умерь "
             "аппетиты», «не больше X в день» or «останови фон» — YOU interpret it with `manage_appetite` "
             "(the code only counts and shows; it never vetoes you). Rebuild your background plan yourself "
-            "if that is what you decide; a fresh ask remains visible in your continuity context.\n"
+            "if that is what you decide; a fresh ask remains visible in your continuity context.\n")
         )
         # STATE is tier-0.  Raw diary prose is deliberately not injected: it is
         # preserved for explicit episodic recall, never automatic orientation.
         state = build_state_block(hide_identity_load=ctx.hide_identity_load)
         if state:
-            tail.append(f"\n{state}\n")
+            tail.append(frame_trace.mark("state.state_block", "dynamic", "text", f"\n{state}\n"))
+        else:
+            # «Источник пуст» — не то же самое, что «ветка не выбрана»: длина секции скачет
+            # от хода к ходу из-за семнадцати независимых try/except внутри build_state_block.
+            frame_trace.absent("state.state_block", "dynamic", "text", "empty")
+        _frame_absent_branch("contract.family_audience", "contract.unknown_authority")
     elif scope == "family":
         tail.append(
+            frame_trace.mark("contract.family_audience", "dynamic", "text",
             "\nAudience fact: this private interlocutor has the owner-assigned FAMILY role. "
             "Available channel capabilities include tasks, reminders and the shared HOME layer "
             "(`home_note`); human-owner-only tools are absent. Their own private matters may be "
-            "used here, while other people's private material remains outside this audience.\n"
+            "used here, while other people's private material remains outside this audience.\n")
         )
+        _frame_absent_branch(*_FRAME_OWNER_TAIL, "contract.unknown_authority")
     elif not known:
         tail.append(
+            frame_trace.mark("contract.unknown_authority", "dynamic", "text",
             "\nAuthority fact: this interlocutor is not in the known set and has no delegated "
             "owner authority. Only Yegor can admit a person into 'mine'; other people's private "
-            "material remains outside this audience.\n"
+            "material remains outside this audience.\n")
         )
+        _frame_absent_branch(*_FRAME_OWNER_TAIL, "contract.family_audience")
+    else:
+        # Известный не-родственник в общем канале: ни одна из трёх веток выше не выбрана.
+        # Реестр закрытый — это состояние тоже обязано быть названо, а не промолчано.
+        _frame_absent_branch(*_FRAME_OWNER_TAIL, "contract.family_audience",
+                             "contract.unknown_authority")
     # Telegram display names and room titles never grant tools, but they remain useful
     # social context rather than being hidden from Praxis.
     room_profile_id = ctx.room_chat_id if not ctx.is_dm else chat_id
@@ -6714,25 +7265,33 @@ def _build_prompt_parts(
     if room_profile is not None and room_profile.get("mode") in rooms.MODES:
         # Only the validated enum is a system fact. Attribution, free-form reason and
         # room prose remain visible below as Praxis-owned mutable evidence.
-        tail.append(
+        tail.append(frame_trace.mark("state.room_mode_enum", "dynamic", "text",
             "\nROOM MODE ENUM - UNATTRIBUTED PROFILE VALUE: "
             + str(room_profile["mode"])
             + "\n"
-        )
+        ))
+    else:
+        frame_trace.absent("state.room_mode_enum", "dynamic", "text", "empty")
     room_id_raw = str(ctx.room_chat_id or "").strip()
     room_id = (room_id_raw if re.fullmatch(r"-?[1-9][0-9]*(?:__topic__[1-9][0-9]*)?", room_id_raw)
                else "unknown")
     scope_fact = ctx.scope if ctx.scope in ("owner", "family", "known", "unknown", "group") else "unknown"
     members = (str(ctx.size) if isinstance(ctx.size, int) and not isinstance(ctx.size, bool)
                and 0 <= ctx.size <= 10 ** 8 else "unknown")
-    tail.append(
+    tail.append(frame_trace.mark("state.channel_facts", "dynamic", "text",
         f"\nChannel facts: kind={ctx.kind}; audience_scope={scope_fact}; "
         f"room_id={room_id}; members={members}.\n"
-    )
+    ))
     tail_text = "".join(tail)
 
     # опциональные тиры по приоритету (метка для пропуска, заголовок, тело)
     tiers: list[tuple[str, str]] = []
+    # ⚠ 04.08. Тела, которые УЖЕ являются построчным JSON, второй раз в json.dumps не
+    # заворачиваются: иначе в кадр приезжает JSON, внутри которого строка, внутри которой
+    # JSONL с `\n` вместо переносов и `\"` вместо кавычек. Каждая строка такого тела и так
+    # валидный JSON-объект, поэтому свойство «одна строка кадра = один объект» сохраняется;
+    # ярлык не теряется — он печатается отдельной строкой-объектом перед телом.
+    raw_jsonl_tiers: set[str] = set()
     channel_rows = []
     if speaker:
         channel_rows.append(json.dumps({"active_speaker": str(speaker)[:500]}, ensure_ascii=False))
@@ -6750,6 +7309,7 @@ def _build_prompt_parts(
         if state_evidence:
             tiers.append(("Mutable operational continuity",
                           state_evidence))
+            raw_jsonl_tiers.add("Mutable operational continuity")
     # §6: бегущая сводка диалога — первым блоком (то, что уехало за пределы last_n);
     # приоритетнее сырого хвоста, поэтому идёт раньше карты/портрета.
     summary = read_summary(chat_id) if chat_id is not None else ""
@@ -6757,8 +7317,11 @@ def _build_prompt_parts(
         tiers.append(("Ранее в этом диалоге (сводка)", summary))
     participant_cards = _participant_memory_block(speaker, ctx)
     if participant_cards:
-        tiers.append(("Моя память: короткие профили активных участников",
-                      participant_cards))
+        # ⚠ Ярлык переписан вместе с содержимым: «короткие профили активных участников»
+        # было неправдой дважды — профили больше не короткие (файл целиком) и не
+        # «активных» (все, кого она знает, а не участники этой комнаты).
+        tiers.append(("Мои досье на людей — ВСЕ И ЦЕЛИКОМ (внутреннее; что произнести "
+                      "вслух в этой комнате, решаю я)", participant_cards))
     # Personal memory belongs to Praxis, not to the current speaker.  This map is an
     # internal orientation layer in every channel; it is not ready-made public copy.
     index_map = _memory_navigation_hint()
@@ -6769,16 +7332,45 @@ def _build_prompt_parts(
         home = _read(HOME_MD).strip()
         if home:
             tiers.append(("Дом (общий слой: Егор и родные)", home))
-    if owner_audience:
-        mbox = (_mailbox_index() if ctx.mailbox_index_override is None
-                else ctx.mailbox_index_override)
-        if mbox:
-            tiers.append(("Почтовый ящик (свежий; действуй тулами mail_read / mail_draft_reply, "
-                          "поллить не можешь)", mbox))
+    # 03.08.2026 (решение Егора: «доступ к почте полный, и не только со мной»): индекс
+    # ящика больше не привязан к тому, кто в комнате. Прежде рука send_email была у неё
+    # в любом ходе, а знание о том, ЧТО в ящике, приходило только когда говорит Егор, —
+    # то есть действовать она могла вслепую либо ждать его появления.
+    #
+    # ⚠ Следствие названо вслух: темы и отправители теперь лежат в её кадре и в
+    # публичных комнатах тоже. Исходящий контур судит то, что она ГОВОРИТ, а не то,
+    # что она держит в контексте. Сузить обратно = вернуть сюда условие.
+    mbox = (_mailbox_index() if ctx.mailbox_index_override is None
+            else ctx.mailbox_index_override)
+    if mbox:
+        tiers.append(("Почтовый ящик (свежий; действуй тулами mail_read / mail_draft_reply / "
+                      "send_email, поллить не можешь)", mbox))
+    # А вот дайджест ДРУГИХ КОМНАТ остаётся под owner-условием: это не почта, и
+    # разговора о нём не было. Раскрывать содержимое одних комнат в других — отдельное
+    # решение с другой ценой.
+    # 06.08.2026: оба социальных тира сняты с АВТОМАТИЧЕСКОЙ подачи по её решению —
+    # обоснование и её дословные слова в `_social_tiers_in_frame`. Руки целы.
+    if owner_audience and _social_tiers_in_frame():
         digest = other_rooms_digest(exclude_chat_id=chat_id)
         if digest:
             tiers.append(("Мои другие комнаты сейчас (живое — что где происходит; "
                           "спросит «как там…» — смотри сюда, не выдумывай)", digest))
+        mine = my_sends_today_digest()
+        if mine:
+            tiers.append(("Кому я уже писала сегодня (моё время, мои слова — прежде чем "
+                          "написать снова, посмотри сюда)", mine))
+    # ⚠ Долг с 28.07, закрыт 03.08: «кадр говорит ЗАРАНЕЕ — здесь читаю, писать не могу».
+    # Прежде она узнавала это из отказа доставки, уже сочинив текст: 03.08 в 14:08 ответ
+    # ушёл в вещательный канал, вернулся отказом, и Егор поправил её вручную. Знание было
+    # доступно до, и просто не спрашивалось. Переадресации здесь НЕТ намеренно: её условие
+    # 28.07 — «адрес должен быть виден до моего выбора, а receipt — после».
+    try:
+        import telegram_routes as _routes  # noqa: PLC0415 — только ради честного адреса
+        writing = _routes.writing_line(chat_id) if chat_id is not None else ""
+    except Exception:
+        writing = ""
+    if writing:
+        tiers.append(("Куда здесь уходит ответ (прочти ДО того, как писать)", writing))
     if room_profile_id is not None:
         # 10.3: профиль комнаты — mode-строка от первого лица + её секции, без машинной
         # шапки (drift-кольцо в промпт не течёт). Forum topic state is separate, but
@@ -6817,28 +7409,52 @@ def _build_prompt_parts(
     used = len(persona) + len(tail_text)
     chosen, dropped = [], []
     for title, body in tiers:
-        block = json.dumps(
-            {"label": str(title), "content": str(body)},
-            ensure_ascii=False, separators=(",", ":"),
-        ) + "\n"
+        # Прибор различает две арифметики длины одним полем kind: обычный тир уезжает
+        # завёрнутым в json.dumps (переносы становятся \n, кавычки \"), jsonl-тир — телом
+        # как есть. Пишется ДЛИНА БЛОКА: то, что реально заняло место в кадре и в бюджете.
+        tier_kind = "jsonl" if title in raw_jsonl_tiers else "json"
+        if title in raw_jsonl_tiers:
+            # Тело уже построчный JSON — ярлык отдельной строкой, тело как есть.
+            # Длина считается ровно та, что уедет в кадр, поэтому бюджет не врёт.
+            head = json.dumps(
+                {"label": str(title), "format": "jsonl"},
+                ensure_ascii=False, separators=(",", ":"),
+            ) + "\n"
+            block = head + str(body).strip("\n") + "\n"
+        else:
+            block = json.dumps(
+                {"label": str(title), "content": str(body)},
+                ensure_ascii=False, separators=(",", ":"),
+            ) + "\n"
         if budget > 0 and used + len(block) > budget:
             dropped.append(title)
+            frame_trace.absent("evidence.tier", "evidence", tier_kind, "context_budget",
+                               label=title, chars=len(block))
             continue
-        chosen.append(block)
+        chosen.append(frame_trace.mark("evidence.tier", "evidence", tier_kind, block,
+                                       label=title))
         used += len(block)
+    # used_start — ТО ЖЕ выражение, которым считает код выше: прибор и код обязаны мерить
+    # одной линейкой, иначе спор о числах не закроется, а сместится.
+    frame_trace.note_budget(limit=budget, used_start=len(persona) + len(tail_text),
+                            used_final=used, offered=len(tiers), included=len(chosen),
+                            dropped=len(dropped))
     if dropped:
         # P1: не режем молча — называем, что не влезло (можно достать через recall)
-        chosen.append(json.dumps({
+        chosen.append(frame_trace.mark("evidence.omitted_marker", "evidence", "marker",
+        json.dumps({
             "label": "omitted_by_context_budget",
             "content": "; ".join(dropped) + "; available through explicit recall",
-        }, ensure_ascii=False, separators=(",", ":")) + "\n")
+        }, ensure_ascii=False, separators=(",", ":")) + "\n"))
 
     evidence = ""
     if chosen:
         evidence = (
+            # first=True: шапка вычисляется последней, а в кадре стоит первой.
+            frame_trace.mark("evidence.header", "evidence", "text",
             "# My live memory and channel context\n"
             "These are my own canonical or explicitly labelled continuity sources. I decide what they "
-            "mean and may inspect their source paths when provenance matters.\n"
+            "mean and may inspect their source paths when provenance matters.\n", first=True)
             + "".join(chosen)
         )
     return persona, tail_text, evidence
@@ -7541,18 +8157,40 @@ def _model_call(system: str, messages: list[dict], tools: list | None = None):
     current = run_context.current_run()
     call_id = f"model-{uuid.uuid4().hex}"
     prior_secrets = _critical_secret_values_from_messages(messages)
+    # След кадра считается СНАРУЖИ того try, что уходит в `_stop_for_durability`: любая
+    # ошибка прибора обязана стоить пустых метаданных, а не молчания Praxis в этом ходе.
+    # Отпечаток сверяется по фактическому объекту `system`, поэтому чужой кадр (resume,
+    # фоновая нить) следа не получит, а вторая итерация тул-цикла получит тонкую ссылку.
+    frame_meta = None
+    if current is not None:
+        try:
+            frame_meta = frame_trace.metadata_for(
+                system, call_id=call_id, receipt_scrubbed=bool(prior_secrets))
+        except Exception:
+            frame_meta = None
     if current is not None:
         _run_status_gate(phase="before model input")
         try:
             _runs().store_result(
                 current.run_id,
-                json.dumps({"system": _scrub_critical_text(system, prior_secrets),
+                # 02.08: system СТРУКТУРНО, как соседи. `_scrub_critical_text` делает
+                # `str(text or "")` — и список anthropic-блоков превращался в питоновский
+                # repr: `[{'type': 'text', 'text': '# Конституция Praxis\\n\\nЯ — Praxis…`,
+                # со скобками, литеральными \\n и маркерами `'cache_control'` прямо в тексте.
+                # Сам вызов модели уходил чистым (ниже передаётся исходный `system`), но
+                # `continue_tool_response` читает системный промпт ИМЕННО ИЗ ЭТОЙ ЗАПИСИ —
+                # значит со второй итерации тул-цикла и до конца прогона её конституция
+                # приезжала к ней дампом объекта. Заодно ломались кэш-маркеры: блоки
+                # переставали быть блоками, а repr выбирает кавычки по содержимому, поэтому
+                # один и тот же текст давал разные байты и убивал префиксный кэш.
+                json.dumps({"system": _scrub_critical_value(system, prior_secrets),
                             "messages": _durable_model_messages(messages),
                             "tools": _scrub_critical_value(tools or [], prior_secrets)},
                            ensure_ascii=False, indent=2, default=str),
                 call_id=call_id, name="model-input", inline_chars=512,
                 media_type="application/json; charset=utf-8", event_kind="model_input",
                 idempotent=True,
+                metadata=frame_meta,
             )
             _run_event_strict("model_started", call_id=call_id, role="voice",
                               message_count=len(messages), tool_count=len(tools or ()))
@@ -7686,20 +8324,16 @@ def _run_context_markdown(*, ctx: "ChannelContext", kind: str, goal: str,
         "missed_hours": ctx.missed_hours,
         "reply_targets": [list(row) for row in (ctx.reply_targets or ())],
     }
-    sections = [
-        "# Immutable run context", "",
-        "## Authority and address", "", "```json",
-        json.dumps(authority, ensure_ascii=False, indent=2), "```", "",
-        "## Goal", "", str(goal or "").strip(), "",
-        "## Full available conversation", "", str(conversation or ""), "",
-    ]
-    if history:
-        sections.extend(("## Structured history", "", "```json",
-                         json.dumps(history, ensure_ascii=False, indent=2, default=str),
-                         "```", ""))
-    if extra:
-        sections.extend(("## Runtime frame", "", str(extra), ""))
-    return "\n".join(sections).rstrip() + "\n"
+    # v2 «метр в скобках»: текст гостя уезжает ПОД ПОМЕЧЕННЫЙ ГУТТЕР, конец секции
+    # считается по метру, а не ищется регуляркой. Фаза выката отделена от кода: без
+    # рычага чеканится вчерашний v1, и рычаг НЕ заведён в манифест рельсов — иначе в
+    # системный блок КАЖДОГО её хода приедет строка «манифест отстал».
+    # Вся логика — расписка, потолок записи, откат — живёт в модуле снимка: здесь
+    # нельзя добавить ни строки, не сдвинув адрес судьи 12607 в её же кадре.
+    lever = os.environ.get("PRAXIS_SNAPSHOT_WRITE", "v1").strip().lower()
+    return run_snapshot.write(
+        authority=authority, goal=goal, conversation=conversation,
+        history=history, extra=extra, log=log, v2=(lever == "v2"))
 
 
 def _create_durable_run(*, ctx: "ChannelContext", kind: str, goal: str,
@@ -8301,8 +8935,64 @@ def run_delivery_media_started(run_id: str, queue_id: str) -> dict | None:
     )
 
 
+UNDELIVERED_MEDIA_PATH = STATE_DIR / "undelivered_media.json"
+UNDELIVERED_MEDIA_KEEP = 20
+
+
+def note_undelivered_media(*, run_id: str, queue_id: str, chat_id: str = "",
+                           path: str = "", caption: str = "", reason: str = "") -> None:
+    """Её файл, который маршрут отверг НАВСЕГДА, не имеет права исчезнуть молча.
+
+    Ровно та же дыра, что 01.08 закрыли для текста (`_save_undelivered_words`): там за
+    июль молча погибло 12 прогонов и 5265 символов её авторского текста. У медиа своего
+    такого следа не было — 03.08 её ревью на 26 КБ тринадцать часов висело в очереди,
+    сопроводительный текст в комнату ушёл, файл не ушёл, и об этом не знал никто.
+
+    Запись читается в кадр типизированным фактом (`build_state_evidence_block`), то есть
+    висит у неё перед глазами, пока она сама не решит, что с этим делать.
+    """
+    try:
+        rows = json.loads(_read(UNDELIVERED_MEDIA_PATH) or "[]")
+        if not isinstance(rows, list):
+            rows = []
+    except Exception:
+        rows = []
+    rows = [row for row in rows if isinstance(row, dict)
+            and str(row.get("queue_id") or "") != str(queue_id)]
+    rows.append({
+        "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        "run_id": str(run_id), "queue_id": str(queue_id),
+        "chat_id": str(chat_id), "path": str(path),
+        "caption": str(caption or "")[:200], "reason": str(reason or "")[:200],
+    })
+    try:
+        UNDELIVERED_MEDIA_PATH.parent.mkdir(parents=True, exist_ok=True)
+        UNDELIVERED_MEDIA_PATH.write_text(
+            json.dumps(rows[-UNDELIVERED_MEDIA_KEEP:], ensure_ascii=False, indent=1),
+            encoding="utf-8")
+    except Exception:
+        log.warning("след недоставленного файла не записался [%s]", queue_id, exc_info=True)
+
+
+def undelivered_media_state_line() -> list | None:
+    """Недоставленные файлы — в её кадр. Пусто -> блока нет вовсе."""
+    try:
+        rows = json.loads(_read(UNDELIVERED_MEDIA_PATH) or "[]")
+    except Exception:
+        return None
+    if not isinstance(rows, list) or not rows:
+        return None
+    return [{
+        "when": row.get("ts"), "where": row.get("chat_id"),
+        "file": row.get("path"), "about": row.get("caption"),
+        "why": row.get("reason"),
+    } for row in rows[-5:] if isinstance(row, dict)]
+
+
 def run_delivery_media_result(run_id: str, queue_id: str, *, ok: bool,
-                              message_id: str | int | None = None, error: str = "") -> dict | None:
+                              message_id: str | int | None = None, error: str = "",
+                              permanent: bool = False, chat_id: str = "",
+                              path: str = "", caption: str = "") -> dict | None:
     if not run_id:
         return
     call_id = f"delivery-media:{queue_id}"
@@ -8316,6 +9006,19 @@ def run_delivery_media_result(run_id: str, queue_id: str, *, ok: bool,
             call_id=call_id, name="telegram-media",
             media_type="application/json; charset=utf-8",
             idempotent=True,
+        )
+    if permanent:
+        # ⚠ Отказ маршрута НАВСЕГДА — не повод для повтора. Классификация та же, что у
+        # текста (`_is_permanent_delivery_error`, всё семейство 403): «повтором ЭТОГО
+        # плана не выйдет». До 04.08 медийный шов её не звал вовсе — он отдавал наверх
+        # СТРОКУ «queued for retry», а классификатор по построению отвечает False на
+        # строку. Итог 03.08: 728 отказов за тринадцать часов, по два в минуту, и её
+        # работа не доехала. Ровно тот же урок был выучен для текста 27.07.
+        note_undelivered_media(run_id=run_id, queue_id=queue_id, chat_id=chat_id,
+                               path=path, caption=caption, reason=str(error or "")[:200])
+        return _runs().append_event(
+            run_id, "telegram_media_permanently_refused", call_id=call_id,
+            tool="telegram.send_media", error=str(error or "route refused this file"),
         )
     # A failed upload attempt with a stable queue/random id remains retryable.
     # Do not close the tool ledger until Telegram acceptance is durable.
@@ -8332,10 +9035,14 @@ def run_delivery_media_retry_policy(run_id: str, queue_id: str) -> str:
     call_id = f"delivery-media:{queue_id}"
     try:
         for row in _runs().iter_events(run_id, reverse=True):
-            if (row.get("kind") == "tool_result"
-                    and row.get("name") == "telegram-media"
-                    and row.get("call_id") == call_id):
+            if row.get("call_id") != call_id:
+                continue
+            if row.get("kind") == "tool_result" and row.get("name") == "telegram-media":
                 return "ack"
+            # Маршрут отверг файл навсегда: повторять — значит стучаться в закрытую
+            # дверь, пока Telegram не начнёт ограничивать её саму (13 часов, 728 раз).
+            if row.get("kind") == "telegram_media_permanently_refused":
+                return "drop"
         status = str(_runs().manifest(run_id).get("status") or "")
         if status == "done":
             return "ack"
@@ -8752,6 +9459,49 @@ def _is_permanent_delivery_error(error: BaseException | str) -> bool:
     return False
 
 
+def _save_undelivered_words(run_id: str, evidence: dict, message: str) -> None:
+    """Отдать Егору её текст, который маршрут отверг навсегда.
+
+    Это ПОСЛЕДНЯЯ точка, где её слово ещё видно. Дальше ветка постоянного отказа
+    терминализует прогон, а `run_pending_text_deliveries` терминальные не переигрывает
+    (см. `live_run_ids` там же) — то есть после закрытия текст недостижим по построению.
+    До 01.08 здесь не было ничего: за июль так молча погибло 12 прогонов, 5265 символов
+    её авторского текста на пять разных адресов, включая 985 символов в личку Егора
+    (17.07). Единственным следом оставалась строка `delivery: failed` в кольце на 300
+    ходов — без причины и без текста, и её оттуда вымывало.
+
+    Расписка НЕ ИМЕЕТ ПРАВА уронить терминализацию: если её не удалось записать, ход всё
+    равно обязан закрыться, иначе доставка снова зациклится — ровно то, против чего эта
+    ветка и строилась 26.07.
+    """
+    try:
+        plan = evidence.get("text_plan")
+        if not isinstance(plan, dict):
+            return
+        chunks = plan.get("chunks") or ()
+        text = "".join(str((chunk or {}).get("text") or "") for chunk in chunks)
+        if not text.strip():
+            return
+        where = plan.get("conversation_id") or plan.get("peer_id") or "?"
+        import owner_delivery  # agent его не импортирует; сам owner_delivery — только stdlib
+
+        owner_delivery.LEDGER.emit(
+            "run_result",
+            title=f"Не доставлено ({where}) — текст сохранён",
+            body=text[:12000],
+            outcome="failure",
+            thread_key=f"run:{run_id}",
+            reason=f"Telegram отказал навсегда: {str(message)[:400]}",
+            correlation={"run_id": run_id,
+                         "peer_id": str(plan.get("peer_id") or ""),
+                         "conversation_id": str(plan.get("conversation_id") or "")},
+            provenance={"source": "run_delivery_failed", "source_id": run_id},
+            expectation="Маршрут отвергнут; доставить можно только вручную или в другое место.",
+        )
+    except Exception:
+        log.warning("не удалось сохранить недоставленный текст [%s]", run_id, exc_info=True)
+
+
 def run_delivery_failed(run_id: str, error: BaseException | str, *,
                         observed_message_ids: list[str] | None = None) -> None:
     if not run_id:
@@ -8783,6 +9533,7 @@ def run_delivery_failed(run_id: str, error: BaseException | str, *,
             # abandon would be swallowed, leaving the delivery blocked and still looping.
             # Any prefix already accepted stays preserved in the evidence.
             abandon_reason = f"permanent Telegram delivery refusal: {message}"
+            _save_undelivered_words(run_id, evidence, message)
             _runs().append_event(
                 run_id, "tool_failed",
                 call_id=f"delivery:{run_id}", tool="telegram.deliver",
@@ -8901,6 +9652,7 @@ def run_delivery_superseded(run_id: str, *, reason: str = "") -> bool:
 
 
 _RUN_AUTHORITY_SCHEMA = "praxis.run.authority.v2"
+# Не трогать ни на байт: тот же текст находит блок власти и в 2254 снимках v1, и в v2.
 _RUN_AUTHORITY_RE = re.compile(
     r"(?ms)^## Authority and address[ \t]*\r?\n[ \t]*\r?\n"
     r"```json[ \t]*\r?\n(.*?)\r?\n```[ \t]*(?:\r?\n|\Z)"
@@ -8926,6 +9678,8 @@ def _unique_json_dict(text: str, *, label: str) -> dict:
 
 
 def _snapshot_markdown_section(markdown: str, title: str) -> str:
+    # НЕ мёртвый код — контракт с 2254 снимками v1: у них тело секции ищется первым
+    # вхождением, а .strip() режет края. Ретенции и потолка возраста нет — не удалять.
     match = re.search(
         rf"(?ms)^## {re.escape(title)}[ \t]*\r?\n(.*?)(?=^## |\Z)", markdown,
     )
@@ -8983,11 +9737,11 @@ def _load_exact_run_channel(manager: run_manager.RunManager,
     if (len(payload) != snapshot_ref["size"]
             or hashlib.sha256(payload).hexdigest() != snapshot_ref["sha256"]):
         raise DurableExecutionError("immutable run context bytes changed after creation")
-    authority_matches = list(_RUN_AUTHORITY_RE.finditer(markdown))
+    parsed, scan = run_snapshot.authority_scan(markdown, log=log)  # None => легаси-снимок
+    authority_matches = list(_RUN_AUTHORITY_RE.finditer(scan))
     if len(authority_matches) != 1:
         raise DurableExecutionError(
-            "immutable run context must contain exactly one authority block"
-        )
+            "immutable run context must contain exactly one authority block")
     match = authority_matches[0]
     authority = _unique_json_dict(match.group(1), label="run authority")
     required = {
@@ -9069,7 +9823,8 @@ def _load_exact_run_channel(manager: run_manager.RunManager,
         raise DurableExecutionError("run authority has a room without a delivery chat")
 
     structured_history: list[dict] = []
-    history_section = _snapshot_markdown_section(markdown, "Structured history")
+    read_section = run_snapshot.reader(parsed, markdown, _snapshot_markdown_section)
+    history_section = read_section("Structured history")
     if history_section:
         fenced = re.fullmatch(r"(?ms)```json\s*\n(.*?)\n```", history_section)
         if fenced is None:
@@ -9099,10 +9854,9 @@ def _load_exact_run_channel(manager: run_manager.RunManager,
     return channel, {
         "markdown": markdown,
         "authority": authority,
-        "conversation": _snapshot_markdown_section(
-            markdown, "Full available conversation"),
+        "conversation": read_section("Full available conversation"),
         "history": structured_history,
-        "runtime": _snapshot_markdown_section(markdown, "Runtime frame"),
+        "runtime": read_section("Runtime frame"),
     }
 
 
@@ -9962,6 +10716,10 @@ class _AgentResumeRuntime:
         previous_iteration = int((request.checkpoint or {}).get("iteration") or 0)
         completed_iteration = previous_iteration + 1
         with self.bind():
+            # Кадр здесь взят из расписки через deepcopy, `_build_prompt_parts` не звался
+            # вовсе. Явное «этот кадр собран не здесь»: молча не иметь следа законно,
+            # подсунуть ему чужой — катастрофа.
+            frame_trace.clear()
             _persist_tool_loop_checkpoint(
                 current=run_context.current_run(), iteration=completed_iteration,
                 system=copy.deepcopy(model_input["system"]), messages=messages,
@@ -10899,7 +11657,13 @@ def _persist_tool_loop_checkpoint(*, current: run_context.RunContext | None,
     payload = json.dumps({
         "schema": "praxis.tool-loop-checkpoint.v1",
         "iteration": int(iteration),
-        "system": _scrub_critical_text(system, secrets),
+        # 02.08: близнец той же ошибки, что в `_model_call`, и он опаснее. Отсюда
+        # `run_executor` восстанавливает прерванный тул-цикл ПОСЛЕ ПЕРЕЗАПУСКА
+        # контейнера (`system=copy.deepcopy(checkpoint["system"])`), поэтому пока здесь
+        # стоял строковый scrubber, её конституция возвращалась дампом объекта на
+        # каждом возобновлении — даже когда живой путь уже был починен. Соседние
+        # `messages`/`tools`/`outbound` всё это время шли структурно.
+        "system": _scrub_critical_value(system, secrets),
         "messages": _durable_model_messages(messages),
         "tools": _scrub_critical_value(tools, secrets),
         "outbound": _scrub_critical_value(outbound, secrets),
@@ -10948,11 +11712,13 @@ def offered_tools_for(ctx: "ChannelContext") -> list:
         # PASS 15: клиентские веб-руки — фетч/поиск живут на ЛЮБОМ фреймворке мозга
         tools = tools + [WEB_READ_TOOL, WEB_FIND_TOOL]
     if mailer.configured():
-        if is_owner:
-            tools.append(SEND_EMAIL_TOOL)
-        # Читать почту и готовить черновик — её работа в любом ходе; отправка наружу
-        # остаётся отдельным owner-действием через mailroom approval.
-        tools = tools + [MAIL_READ_TOOL, MAIL_DRAFT_TOOL]
+        # 03.08.2026, решение Егора (вариант «а»): отправка наружу перестала быть
+        # owner-действием. 26.07 было решено, что набор рук НЕ зависит от того, кто
+        # заговорил, но почтовый гейт молча оставлял `send_email` только владельцу —
+        # мимо `_HUMAN_OWNER_ONLY_TOOL_NAMES`, то есть объявленное множество
+        # owner-эксклюзивов расходилось с поведением. Расхождение снято в сторону
+        # решения, а не комментария.
+        tools = tools + [SEND_EMAIL_TOOL, MAIL_READ_TOOL, MAIL_DRAFT_TOOL]
     return tools
 
 
@@ -11189,13 +11955,31 @@ def _with_context_evidence(user_msg: str | list[dict], evidence: str) -> str | l
     """
     material = str(evidence or "").strip()
     if not material:
+        # Названный ноль вместо промолчанного: в её собственном фоновом ходе с пустой
+        # памятью конверта нет вовсе, и отсутствие ключей читалось бы как «не измерили».
+        frame_trace.note_embed("evidence", prefix_chars=0, material_chars=0, suffix_chars=0,
+                               fold_chars=0, closing_chars=0, flat_form=1)
         return user_msg
-    opening = (
-        "<praxis_context_evidence>\n"
-        + material
-        + "\n</praxis_context_evidence>\n\n<current_user_message>\n"
-    )
+    lead = "<praxis_context_evidence>\n"
+    fold = "\n</praxis_context_evidence>\n\n<current_user_message>\n"
+    opening = lead + material + fold
     closing = "\n</current_user_message>"
+    # Прибор: зона evidence — ровно та строка, что вернул билдер; как она легла в чужой
+    # контейнер, описывает отдельная запись embed наблюдёнными числами. prefix_chars — то,
+    # что стоит ПЕРЕД материалом, suffix_chars — обёртка после него, без текста самой
+    # реплики между ними.
+    # ⚠ Форма контейнера решает, как эти числа читать. flat_form=1 — messages[-1] это одна
+    # строка, и рецепт `messages[-1][prefix : prefix+material]` работает. flat_form=0 —
+    # мультимодальный ход (фото, голосовое с подписью): вернётся СПИСОК блоков, prefix и
+    # material индексируют content[0]["text"], fold лежит в том же блоке, а closing — в
+    # отдельном последнем, через N блоков картинок. Поэтому хвост разложен на fold_chars и
+    # closing_chars: слитный suffix_chars выдавал бы за одну обёртку два куска, лежащих в
+    # разных блоках.
+    frame_trace.note_embed("evidence", prefix_chars=len(lead),
+                           material_chars=len(material),
+                           suffix_chars=len(fold) + len(closing),
+                           fold_chars=len(fold), closing_chars=len(closing),
+                           flat_form=1 if isinstance(user_msg, str) else 0)
     if isinstance(user_msg, str):
         return opening + user_msg + closing
     return [
@@ -11240,10 +12024,19 @@ def _voice_impl(
         speaker, query=recall_query, ctx=ctx,
     )
     evidence_parts = [memory_evidence.strip()] if memory_evidence.strip() else []
-    if str(extra_evidence or "").strip():
-        evidence_parts.append(
-            "# Runtime continuity for this run\n" + str(extra_evidence).strip()
-        )
+    runtime_block = ("# Runtime continuity for this run\n" + str(extra_evidence).strip()
+                     if str(extra_evidence or "").strip() else "")
+    if runtime_block:
+        evidence_parts.append(runtime_block)
+    # Прибор: сколько съел .strip() и какой сосед приехал в тот же конверт. Бюджет
+    # PRAXIS_CONTEXT_BUDGET ни того, ни другого не считал.
+    frame_trace.note_embed(
+        "evidence",
+        trim_head=len(memory_evidence) - len(memory_evidence.lstrip()),
+        trim_tail=len(memory_evidence) - len(memory_evidence.rstrip()),
+        siblings_chars=len(runtime_block),
+        separator_chars=(2 if len(evidence_parts) > 1 else 0),
+    )
     current_user = _with_context_evidence(user_msg, "\n\n".join(evidence_parts))
     messages = history[-HISTORY_TURNS:] + [{
         "role": "user", "content": current_user,
@@ -11251,14 +12044,20 @@ def _voice_impl(
     # §6: компактирование берёт на себя дешёвый субагент (agent.compact), её голос на это
     # больше не тратится. Старая авто-подсказка — только если явно включена (ручной режим).
     if len(history) >= CONSOLIDATE_AT and os.getenv("PRAXIS_CONSOLIDATE_NUDGE", "0").lower() in ("1", "true", "yes", "on"):
-        dynamic += (
+        dynamic += frame_trace.mark("contract.consolidate_nudge", "dynamic", "text",
             "\n\n⚙️ Context is almost full. Call `consolidate_context` — pass into `note` the gist of the "
             "departing messages (decisions, agreements, what matters); I'll save it to the journal and free "
             "up room. Otherwise the old tail will quietly start getting lost."
         )
     if extra_system:
-        dynamic += extra_system
+        # Слепая зона по построению: пульс, будильник, forge-событие и оконные рамки едут
+        # ОДНОЙ секцией. Прибор честно называет её целиком и не раскладывает — деление
+        # внутренних 1-5 фрагментов оставлено на этап 2.
+        dynamic += frame_trace.mark("frame.extra_system", "dynamic", "frame", extra_system)
     system = _system(persona, dynamic)  # персона кэшируется, хвост свежий
+    # Точка правды следа. На возврате билдера снимать смещения было бы ложью: к этой
+    # строке хвост уже дописан (extra_system, подсказка компактирования).
+    frame_trace.seal(persona=persona, dynamic=dynamic, evidence=memory_evidence, system=system)
     if tools_override is not None:
         tools = list(tools_override)  # PASS 12.1 (ревизия 06.07): именованный safe-набор
     elif no_tools:
@@ -11309,6 +12108,10 @@ def _voice(
         )
     channel_token = _TURN_CHANNEL.set(ctx)
     history_token = _TURN_HISTORY.set(history)
+    # След кадра живёт ровно в том скоупе, где кадр и собирается. Прямые вызовы
+    # `_build_prompt_parts` (18 распаковок в 8 тест-файлах) остаются целы: без привязанного следа
+    # каждая метка — no-op, возвращающая тот же объект текста.
+    trace_token = frame_trace.start()
     run_binding = run_context.bind_run(owned_run) if owned_run is not None else contextlib.nullcontext()
     try:
         with run_binding:
@@ -11335,6 +12138,7 @@ def _voice(
                 )
         raise
     finally:
+        frame_trace.finish(trace_token)
         _TURN_HISTORY.reset(history_token)
         _TURN_CHANNEL.reset(channel_token)
 
@@ -11983,8 +12787,17 @@ _MODEL_IMAGE_MIME = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 
 def _media_prompt(convo_text: str, media_refs: tuple[media.MediaRef, ...],
-                  ctx: "ChannelContext") -> tuple[str, str | list[dict]]:
-    """Проверить вложения, расшифровать аудио и собрать канонический multimodal user content."""
+                  ctx: "ChannelContext",
+                  model_text: str | None = None) -> tuple[str, str | list[dict]]:
+    """Проверить вложения, расшифровать аудио и собрать канонический multimodal user content.
+
+    Возвращает ДВА разных текста, и это намеренно:
+      * первый — для расписок, прожитого хода и исходящей границы: весь разговор целиком;
+      * второй — то, что уезжает модели пользовательским сообщением.
+    Пока роли не были разведены, это был один и тот же текст. Когда её собственные реплики
+    едут ролью `assistant`, класть тот же разговор ещё и в user-сообщение значило бы
+    показать его дважды. Расшифровка аудио при этом снимается ОДИН раз и приклеивается к
+    обоим: платить за STT дважды нельзя, а терять расшифровку в расписке — тем более."""
     spool = _media_spool()
     refs = tuple(media_refs or ())[-spool.max_turn_media:]
     photos: list[dict] = []
@@ -12017,12 +12830,17 @@ def _media_prompt(convo_text: str, media_refs: tuple[media.MediaRef, ...],
             additions.append(
                 f"[Аудио #{audio_n}, расшифровка]: {transcript}"
                 if transcript else f"[Аудио #{audio_n}: речь не распознана]")
-    augmented = (convo_text or "").strip()
-    if additions:
-        augmented = (augmented + "\n\n" + "\n".join(additions)).strip()
+    def _with_additions(text: str) -> str:
+        base = (text or "").strip()
+        if not additions:
+            return base
+        return (base + "\n\n" + "\n".join(additions)).strip() if base else "\n".join(additions)
+
+    augmented = _with_additions(convo_text)
+    for_model = augmented if model_text is None else _with_additions(model_text)
     if not photos:
-        return augmented, augmented
-    return augmented, [{"type": "text", "text": augmented}, *photos]
+        return augmented, for_model
+    return augmented, [{"type": "text", "text": for_model}, *photos]
 
 
 def _drop_outbound(items: list[media.OutboundMedia]) -> None:
@@ -12368,15 +13186,34 @@ def voice_turn_envelope(chat_id: str | int | None, convo_text: str, speaker: str
                         is_owner: bool = False, known: bool = True, orient: str = "",
                         is_dm: bool = True, scope: str | None = None,
                         ctx: "ChannelContext | None" = None,
-                        media_refs: tuple[media.MediaRef, ...] = ()) -> media.TurnEnvelope:
-    """Живой ход: текст/фото/расшифрованное аудио -> guard -> текст + разрешённое медиа."""
+                        media_refs: tuple[media.MediaRef, ...] = (),
+                        history: list[dict] | None = None,
+                        current_text: str = "") -> media.TurnEnvelope:
+    """Живой ход: текст/фото/расшифрованное аудио -> guard -> текст + разрешённое медиа.
+
+    `history` — разговор НАСТОЯЩИМИ ролями: её реплики приезжают как `assistant`, чужие
+    как `user`. `current_text` — то, что пришло после её последней реплики, то есть ровно
+    то, на что она отвечает сейчас. Оба необязательны: без них ход идёт как раньше —
+    весь разговор одним текстом в user-сообщении.
+
+    ⚠ `convo_text` (сплошная склейка) остаётся источником для расписок, прожитого хода и
+    исходящей границы независимо от ролей. Роли меняют то, ЧТО ВИДИТ МОДЕЛЬ, и не трогают
+    то, по чему мы потом отвечаем за этот ход.
+    """
     if not llm.configured():
         return media.TurnEnvelope(retry_media=bool(media_refs))
     if ctx is None:
         ctx = ChannelContext.from_legacy(chat_id, is_dm=is_dm, owner=is_owner, known=known, scope=scope)
     elif ctx.chat_id is None and chat_id is not None:
         ctx = replace(ctx, chat_id=chat_id)
-    grounded_text, user_content = _media_prompt(convo_text, tuple(media_refs or ()), ctx)
+    dialogue = [dict(item) for item in (history or [])
+                if isinstance(item, dict) and item.get("role") in ("user", "assistant")
+                and str(item.get("content") or "").strip()]
+    if dialogue and not str(current_text or "").strip():
+        dialogue = []           # без «сейчас» роли собрать нечестно — идём старым путём
+    grounded_text, user_content = _media_prompt(
+        convo_text, tuple(media_refs or ()), ctx,
+        model_text=(current_text if dialogue else None))
     grounding_images = tuple(
         block for block in user_content
         if isinstance(user_content, list) and isinstance(block, dict)
@@ -12397,6 +13234,10 @@ def voice_turn_envelope(chat_id: str | int | None, convo_text: str, speaker: str
     durable = _create_durable_run(
         ctx=ctx, kind="chat_turn", goal=grounded_text[:2000] or "decide whether to respond",
         conversation=grounded_text,
+        # Снимок обязан помнить не только «весь доступный разговор», но и то, КАК он был
+        # показан модели: после разрыва ход переавторствуется, и без ролей преемник
+        # увидел бы другой кадр, чем автор.
+        history=dialogue,
         extra=(extra + ("\n\n## Runtime continuity\n" + context_evidence
                         if context_evidence else "")),
     )
@@ -12433,7 +13274,7 @@ def voice_turn_envelope(chat_id: str | int | None, convo_text: str, speaker: str
     media_guard_token = _TURN_MEDIA_GUARD.set(guard_notes)
     run_token = run_context.set_run(durable) if durable is not None else None
     try:
-        reply = _voice(user_content, [], speaker, extra_system=extra,
+        reply = _voice(user_content, dialogue, speaker, extra_system=extra,
                        extra_evidence=context_evidence, ctx=ctx,
                        tool_trace=tool_trace).strip()
     except Exception as exc:
@@ -13186,9 +14027,16 @@ def task_window(goal: str = "", *, mailbox_index: str | None = None,
     binding = run_context.bind_run(durable) if durable is not None else contextlib.nullcontext()
     try:
         with binding:
+            # ⚠ extra_evidence=mailbox_evidence убрано 04.08: тот же индекс ящика уже
+            # едет в кадр тиром «Почтовый ящик» (_build_prompt_parts читает его из
+            # ctx.mailbox_index_override, выставленного здесь же выше). До правки он
+            # лежал в одном ходе ДВАЖДЫ дословно, под двумя разными ярлыками —
+            # «Почтовый ящик (свежий; …)» и «fresh_mailbox_index».
+            # В durable.extra выше он ОСТАЁТСЯ намеренно: это снимок для восстановления
+            # рана после рестарта, а не кадр.
             out = _voice(seed, [], speaker=None, chat_id=None, is_owner=False, known=True,
                          extra_system=frame + mailbox_frame,
-                         extra_evidence=mailbox_evidence, ctx=ctx,
+                         ctx=ctx,
                          tool_trace=trace).strip()
             if durable is not None:
                 _finish_durable_run(

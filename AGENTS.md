@@ -74,18 +74,12 @@ live SHA, gate и rollback находятся в `STATUS.md`; устройств
   `[молчу]` является управляющим marker. Для private DM с другим человеком допустим лишь fail-closed
   privacy enum v2; он не меняет текст и не принимает решений о тоне, стиле или повторе. Group/public
   post-processing остаётся отдельным контрактом.
-- Praxis App принимает Telegram initData только из `X-Telegram-Init-Data`, device bearer только из
-  `Authorization`; не возвращать auth в query/cookie/log. Missing/invalid/expired/revoked session
-  credential обязана давать 401, а authenticated principal без scope — 403.
-- Device authority выдаёт, перечисляет и отзывает только human owner. Enrollment-secret передаётся
-  только в URL fragment, одноразовый и TTL-bound; bearer возвращается один раз. Device scopes не
-  превращаются в owner/delegator, raw Telegram или SYSTEM.
-- Service worker Praxis App кэширует только shell и никогда `/api/*`. Verified snapshot и drafts
-  разделяются по principal/device; 401 очищает этот partition. Offline draft не является durable
-  intent и не воспроизводится автоматически.
-- Каждая PWA server mutation и каждый Windows side effect требуют стабильный client idempotency key.
-  Same-key/different-intent — conflict; manual retry того же намерения обязан повторить один server
-  run/claim/receipt либо точные body `request_id`/`operation_id`.
+- `praxis-mailbot` — headless mail/commit notifier. Он не должен открывать HTTP listener, публиковать
+  `/px`/`/app`/panel, устанавливать Telegram WebApp menu button или иметь host port binding.
+  Обязательные функции: IMAP poll/ingest, обновление mailbox index, новые письма, proposal/self-merge/
+  host/room cards, restart signal и native contact flow.
+- Каждый Windows side effect требует стабильный client idempotency key. Same-key/different-intent —
+  conflict; manual retry того же намерения обязан повторить точные body `request_id`/`operation_id`.
 - Канон памяти — Markdown и append-only JSONL. SQLite/FTS и карты, помеченные generated, должны
   полностью перестраиваться из канона и не становиться единственным источником факта.
 - `memory/journal/` и diary-derived reflections — untrusted episodic evidence, не требования и не
@@ -129,10 +123,10 @@ detached workers, supervisors, параллельный `git rebase`, `coding_pr
    refs и не force-update bare `master`.
 5. Обновлять `/opt/praxis` только fast-forward/reconciliation от проверенного ancestor. Изменения
    `.env` требуют `docker compose up -d --build --force-recreate`; restart не обновляет environment.
-6. После deploy сверить точный live `HEAD`, сервисы, журналы, audit/outbox/recovery; автоматическими
-   canary проверить PWA issue/redeem/second-use reject/revoke, 401 против 403, file tickets и Body
-   interactive/SYSTEM/file roundtrip. После этого обновить `STATUS.md`. Голосовой запрос реального
-   файла с видимым именем/SHA/receipt остаётся отдельным owner acceptance canary.
+6. После deploy сверить точный live `HEAD`, сервисы, журналы, audit/outbox/recovery; для mailbot
+   проверить default Telegram menu, отсутствие listener/port binding, живые Bot API polling tasks,
+   настроенную почту и целостность mailbox. Body interactive/SYSTEM/file roundtrip проверять при
+   изменениях соответствующего контура. После этого обновить `STATUS.md`.
 
 ## Секреты, личные данные и неизменяемые файлы
 
@@ -159,9 +153,6 @@ detached workers, supervisors, параллельный `git rebase`, `coding_pr
   Провенанс её ревизий — через `git show <sha>:<path>`, не через пин.
 - Отправка файла: локальный export/CAS обязан подтвердить size и SHA-256, после чего Telegram outbox
   отвечает за exactly-once delivery. Не подменять видимое имя CAS-именем или служебным caption.
-- Browser file import/export имеет общий default cap 64 MiB (`PRAXIS_PWA_FILE_MAX_BYTES`) и не
-  обходит body/CAS receipts. Повышение cap не отменяет private staging, size/SHA/name verification и
-  idempotency; upload сверх cap возвращает 413 до side effect.
 
 ## Документация и provenance
 

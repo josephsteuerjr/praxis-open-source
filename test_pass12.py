@@ -215,7 +215,9 @@ class AbsenceBase(Base):
         import os
         os.environ["PRAXIS_ABSENCE_CAP"] = "3"
         os.environ["PRAXIS_COOLDOWN_DM"] = "8"
-        self.addCleanup(lambda: os.environ.pop("PRAXIS_ABSENCE_CAP", None))
+        # Убирались обе, а возвращалась одна: кулдаун доставался соседям по прогону.
+        for _name in ("PRAXIS_ABSENCE_CAP", "PRAXIS_COOLDOWN_DM"):
+            self.addCleanup(os.environ.pop, _name, None)
 
     def _write_absence(self, *, window=True, note="", contact_id="700"):
         import json

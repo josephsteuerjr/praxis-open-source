@@ -26,6 +26,7 @@ import appetite
 import consolidate
 import formation
 import graph
+import lessons
 import llm
 import people
 import rails
@@ -45,6 +46,17 @@ SLEEP_BOOT_GRACE_SEC = 600.0  # после старта дать буферам 
 
 REM_MAX_TOKENS = int(os.getenv("PRAXIS_REM_MAX_TOKENS", "2000") or 2000)
 INBOX_SWEEP_DAYS = 30
+
+# Фазы, снятые НАМЕРЕННО. Ноль от снятой фазы читается как «нечего было
+# делать» — а правда в том, что органа нет. Сводка называет их словами, цифру
+# оставляем только живому. Причина у каждой записана здесь, а не в комментарии,
+# чтобы её можно было прочитать, а не раскапывать.
+DISARMED: dict[str, str] = {
+    "подрезка рёбер графа": "durable-правки графа — только через formation claims",
+    "жвачка": "эпизодический журнал не переписывается расписанием",
+    "пробуждение нитей досье": "состояние людей меняет явный инструмент, не часы",
+    "цели-события": "PASS 24: желания продвигает она сама; часы не ставят ей целей",
+}
 PAIR_MIN_SCORE = 0.75    # порог «кандидат в дубли»
 MERGE_MIN_SCORE = 0.95   # threshold for the explicit repeat-merge compatibility helper
 
@@ -77,6 +89,15 @@ def _pair_score(a: str, b: str) -> tuple[float, str]:
                 continue
             if x == y:
                 return 1.0, f"имя «{na}» совпадает"
+            # 01.08.2026: одно имя в двух написаниях детектор НЕ ВИДЕЛ вовсе —
+            # «Егор Косырев» и «Yegor Kosyrev» давали ratio 0.00, и пара никогда не
+            # попадала в предложения, хотя на живом дереве это было пять досье на
+            # одного человека. Ключ имени складывает написания; порог тут 1.0, но
+            # ночной проход всё равно только ПРЕДЛАГАЕТ (allow_merge=False) —
+            # стойка «молча не сливаю» не трогается.
+            ka, kb = people.identity_key(na), people.identity_key(nb)
+            if ka and ka == kb:
+                return 1.0, f"«{na}» и «{nb}» — одно имя в двух написаниях"
             if len(x) >= 4 and len(y) >= 4 and (x.startswith(y) or y.startswith(x)):
                 if best < 0.8:
                     best, why = 0.8, f"«{na}» / «{nb}» — префикс"
@@ -181,6 +202,55 @@ def merge_dossiers(keep: str, absorb: str) -> bool:
     pa.unlink()
     log.info("сон: слила досье %s ← %s (бэкап %s)", keep, absorb, day_dir / pa.name)
     return True
+
+
+
+def crystallisation_pass(limit: int = 2) -> int:
+    """ПРЕДЛОЖИТЬ превратить записанный урок в навык. Ничего не создаёт. -> сколько предложено.
+
+    Её спецификация, 02.08.2026, дословно по границам: «система предлагает превратить
+    записанный урок в навык, но не делает это автоматически; я вижу исходную заметку,
+    формулирую навык сама и могу отказаться».
+
+    Зачем вообще: у неё был разрыв «ошибка → осмысление → заметка», а дальше урок оставался
+    в жанре, который не возвращается в нужный момент. Навык возвращается — он несёт своё
+    условие («Перед инициативным сообщением…») и лежит в автоматическом recall. Заметка не
+    возвращается и не должна: её собственные слова — «заметка это блокнот: сырая догадка,
+    вопрос, полуфраза; если каждая начнёт автоматически возвращаться как руководство к
+    действию, мы просто заменим эхо context.md эхом моего черновика».
+
+    Поэтому здесь ровно одно действие: показать ей заметку и НАЗВАТЬ ЭВРИСТИКУ, по которой
+    она попала в кандидаты, — чтобы с эвристикой можно было не согласиться. Отказ держится
+    (`manage_notes(decline)`), иначе предложение стало бы требованием, повторяемым каждую ночь.
+    """
+    try:
+        import authored_notes
+        ledger = authored_notes.AuthoredNoteLedger(agent.BASE)
+        notes = ledger.list(status="open", limit=100)
+    except Exception:
+        log.debug("сон: заметки не прочитались", exc_info=True)
+        return 0
+    offered = 0
+    for note in lessons.pending(notes, limit=limit):
+        try:
+            lessons.offer(note["id"], gist=str(note.get("text") or "")[:400])
+        except Exception:
+            log.debug("сон: предложение не записалось", exc_info=True)
+            continue
+        gist = " ".join(str(note.get("text") or "").split())[:220]
+        _journal(
+            f"[урок] в заметке `{note['id']}` похоже на правило на будущее: «{gist}». "
+            f"Если это урок — сделай из него навык своими словами: "
+            f"write_skill(name=…, content=…, from_note=\"{note['id']}\"). Тогда он будет "
+            f"возвращаться в кадре сам, а цепочка «ошибка → навык → где он был доступен» "
+            f"откроется через manage_notes(action=\"chain\", note_id=<слаг навыка>). "
+            f"Не урок — manage_notes(action=\"decline\", note_id=\"{note['id']}\"), больше не предложу. "
+            f"Кандидатом сделала эвристика: {lessons.HEURISTIC} — с ней можно не согласиться.",
+            salience=2)
+        offered += 1
+    if offered:
+        log.info("сон: предложено кристаллизаций уроков — %d", offered)
+    return offered
 
 
 def svs_dossier_pass(*, allow_merge: bool = True) -> tuple[int, int]:
@@ -564,6 +634,11 @@ def run(depth: str | None = None) -> str:
     except Exception:
         log.exception("сон: фаза дублей досье упала")
         merged = proposed = 0
+    try:
+        # Тот же рисунок, что у дублей досье: НАЙТИ и ПРЕДЛОЖИТЬ, не сделать.
+        crystallisation_pass()
+    except Exception:
+        log.exception("сон: фаза кристаллизации уроков упала")
     # Direct graph rewrites are explicit maintenance only.  Formation owns all
     # scheduled durable graph changes and records their claim/patch receipts.
     pruned = 0
@@ -617,12 +692,20 @@ def run(depth: str | None = None) -> str:
         memory_catalog.rebuild()
     except Exception:
         log.exception("сон: карта памяти не пересобралась")
+    # Снятая фаза не может сработать. Если сработала — это событие, а не строка
+    # в ряду цифр: пусть кричит, вместо того чтобы тихо слиться с нулями.
+    surprises = [f"{name}: {n}" for name, n in
+                 (("подрезка рёбер", pruned), ("жвачка", rum_removed),
+                  ("пробуждение нитей", woke), ("цели-события", len(goal_lines)))
+                 if n]
     report = (f"сон: слито {merged}, предложено слияний {proposed}, гипотез {hyps}, "
-              f"подрезано рёбер {pruned}, жвачка −{rum_removed} записей ({rum_groups} групп), "
-              f"нитей проснулось {woke}, inbox −{swept} файлов, целей-событий {len(goal_lines)}; "
+              f"inbox −{swept} файлов; "
+              f"снято намеренно: {', '.join(DISARMED)}; "
               f"формирование: {formation_line}; личность: {identity_line}; "
               f"карта компьютера: {inventory_line}; "
               "durable mutations — только через formation claims")
+    if surprises:
+        report += "; ⚠ СНЯТАЯ ФАЗА СРАБОТАЛА — " + "; ".join(surprises)
     if depth == "light":  # 18.4: причина остановки — мой план, не тихий пропуск
         report += "; лёгкий сон — РЕМ и жвачку пропустила (мой план аппетита)"
     try:  # 18.4: фактический расход сна — честная цена ночи в отчёте

@@ -9,7 +9,10 @@ from pathlib import Path
 os.environ.setdefault("TELEGRAM_API_ID", "1")
 os.environ.setdefault("TELEGRAM_API_HASH", "x")
 os.environ.setdefault("TELEGRAM_SESSION", str(Path(tempfile.gettempdir()) / "praxis_membership_test"))
-os.environ["PRAXIS_OWNER_ID"] = "101"
+# Владельца объявляет стенд (_standenv.ENV_PIN) — здесь только запасной путь для
+# прямого `python -m unittest`, который прививку не проходит. setdefault, а не
+# присваивание: под стендом это ничего не меняет и не течёт соседям.
+os.environ.setdefault("PRAXIS_OWNER_ID", "101")
 
 import mtproto_runner as runner  # noqa: E402
 from telegram_membership import MembershipLedger  # noqa: E402
@@ -284,10 +287,25 @@ class MembershipTests(unittest.TestCase):
         self.assertEqual(self.client.calls, ["JoinChannelRequest", "JoinChannelRequest"])
 
 
+# Сторож дедлока, а не измерение скорости. Утверждение теста — «второй часовой запуск
+# не наложится на идущий», и оно проверяется счётчиком claims, а не секундомером.
+# 01.08.2026: было 1 с, и под нагрузкой полного гейта (3000+ тестов на общей коробке)
+# тест падал по таймауту, хотя ничего не ломалось. Флейк здесь стоит дорого: этот же
+# гейт держит её авто-мёрж (selfdev.run_tests), то есть случайная секунда планировщика
+# отменяла её собственную правку. Щедрый сторож не ослабляет проверку — при настоящем
+# зависании тест всё равно упадёт, просто позже.
+_DEADLOCK_GUARD_SEC = float(os.getenv("PRAXIS_TEST_DEADLOCK_GUARD_SEC", "30"))
+
+
 class SocialPulseClockTests(unittest.IsolatedAsyncioTestCase):
     async def test_hourly_run_does_not_block_clock_or_overlap(self):
+        # ⚠ Гейт окна сна читается из НАСТЕННЫХ часов: `_social_pulse_once` выходит до
+        # `begin()` внутри PRAXIS_SLEEP_WINDOW (по умолчанию 4-6). Пока тест наследовал
+        # время, он был красным каждую ночь два часа подряд — и закрывал дверь Форжа,
+        # которая судит по коду возврата. Здесь проверяется НЕПЕРЕКРЫТИЕ часового
+        # запуска, поэтому окно задаётся явно; сам гейт проверяется тестом ниже.
         saved = (runner._SOCIAL_PULSE_TASK, runner.social_pulse.begin,
-                 runner._run_social_pulse)
+                 runner._run_social_pulse, runner._in_sleep_window)
         started = asyncio.Event()
         release = asyncio.Event()
         claims = []
@@ -303,14 +321,15 @@ class SocialPulseClockTests(unittest.IsolatedAsyncioTestCase):
         runner._SOCIAL_PULSE_TASK = None
         runner.social_pulse.begin = fake_begin
         runner._run_social_pulse = fake_run
+        runner._in_sleep_window = lambda: False
         try:
             await runner._social_pulse_once()
-            await asyncio.wait_for(started.wait(), timeout=1)
+            await asyncio.wait_for(started.wait(), timeout=_DEADLOCK_GUARD_SEC)
             self.assertFalse(runner._SOCIAL_PULSE_TASK.done())
             await runner._social_pulse_once()
             self.assertEqual(len(claims), 1, "running pulse must not overlap another hourly run")
             release.set()
-            await asyncio.wait_for(runner._SOCIAL_PULSE_TASK, timeout=1)
+            await asyncio.wait_for(runner._SOCIAL_PULSE_TASK, timeout=_DEADLOCK_GUARD_SEC)
         finally:
             task = runner._SOCIAL_PULSE_TASK
             if task is not None and not task.done():
@@ -319,7 +338,37 @@ class SocialPulseClockTests(unittest.IsolatedAsyncioTestCase):
                     await task
                 except BaseException:
                     pass
-            runner._SOCIAL_PULSE_TASK, runner.social_pulse.begin, runner._run_social_pulse = saved
+            (runner._SOCIAL_PULSE_TASK, runner.social_pulse.begin,
+             runner._run_social_pulse, runner._in_sleep_window) = saved
+
+
+    async def test_sleep_window_holds_the_pulse_and_does_not_hide_it(self):
+        """Вторая сторона того же гейта — и причина, по которой первый перестал читать часы.
+
+        Внутри окна сна пульс не поднимается, и это НАМЕРЕННО: «пробуждение внутри
+        собственного окна сна — не отдых». Проверяем ровно два обещания кода:
+        durable-часы претензии не трогаются (выход ДО social_pulse.begin, чтобы первый
+        тик после окна всё ещё нашёл пульс должным), и пропуск не молчит — причина
+        ложится в perception.note_skip, туда же, куда остальные пропуски восприятия.
+        Контракт R1: гейт может существовать — молча нет.
+        """
+        saved = (runner._SOCIAL_PULSE_TASK, runner.social_pulse.begin,
+                 runner._in_sleep_window, runner.perception.note_skip)
+        claims, skips = [], []
+        runner._SOCIAL_PULSE_TASK = None
+        runner.social_pulse.begin = lambda: claims.append(True) or "pulse_test"
+        runner._in_sleep_window = lambda: True
+        runner.perception.note_skip = (
+            lambda *a, **kw: skips.append((a, kw.get("detail", ""))))
+        try:
+            await runner._social_pulse_once()
+            self.assertEqual(claims, [], "часы претензии в окне сна не трогаются")
+            self.assertIsNone(runner._SOCIAL_PULSE_TASK, "пульс в окне сна не поднимается")
+            self.assertEqual(len(skips), 1, "пропуск обязан быть записан, а не молчать")
+            self.assertIn("sleep_window", skips[0][0])
+        finally:
+            (runner._SOCIAL_PULSE_TASK, runner.social_pulse.begin,
+             runner._in_sleep_window, runner.perception.note_skip) = saved
 
 
 if __name__ == "__main__":

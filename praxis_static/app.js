@@ -3,6 +3,11 @@ import { initMemoryViews, destroyMemoryViews } from "/app/static/memory_views.js
 
 const API = "/api/praxis/v1";
 const ACTIVE_STATUSES = new Set(["pending", "running", "blocked", "paused", "in_doubt"]);
+// ⚠ 03.08.2026. ACTIVE_STATUSES означает «не терминальные», а вовсе не «движется»:
+// заблокированный прогон СТОИТ и ждёт человека. Плитка на главной звала его «в движении»
+// и подставляла его цель как текущую работу — то есть врала о занятости Праксис ровно там,
+// где на неё смотрят первым делом. Движение — только эти два статуса.
+const MOVING_STATUSES = new Set(["pending", "running"]);
 const ATTENTION_STATUSES = new Set(["blocked", "paused", "in_doubt", "failed"]);
 const TERMINAL_STATUSES = new Set(["done", "cancelled", "failed"]);
 const IDEMPOTENT_SIDE_EFFECT_COMMANDS = new Set([
@@ -11,6 +16,16 @@ const IDEMPOTENT_SIDE_EFFECT_COMMANDS = new Set([
   "telegram.join", "telegram.leave", "telegram.followup.cancel",
   "memory.rebuild", "inventory.refresh", "system.restart",
   "inbox.read", "inbox.acted", "device.revoke",
+]);
+// ⚠ 03.08.2026. Чистое чтение не должно двигать снимок. map.read не возвращает
+// revision, а scheduleRefresh("") ранним выходом не срабатывает: проверка там
+// `revision && revision === model.revision`, и пустая строка её просто пропускает.
+// Значит каждое открытие карты через 120 мс заказывало полную пересборку снимка —
+// листинг всех durable-манифестов прогонов (их 2120) и COUNT по recall.sqlite3.
+// Прочитать страницу текста стоило столько же, сколько обновить весь экран. А
+// тактильный отклик «medium» там же подписывал чтение как исполненное действие.
+const READ_ONLY_COMMANDS = new Set([
+  "memory.map.read", "memory.search",
 ]);
 const DEVICE_SCOPE_CHOICES = [
   ["praxis.snapshot", "Состояние и inbox"],
@@ -76,11 +91,15 @@ const model = {
   installPrompt: null,
   sheetOpen: false,
   sheetReturnFocus: null,
+  // Развёрнутая на весь экран сцена памяти — отдельное состояние, а не вид и не
+  // шторка: «назад» обязан свернуть её раньше, чем уводить владельца из раздела.
+  memoryFullscreen: false,
 };
 
 // Созвездие и дендрограмма монтируются один раз за сессию: renderMemory зовётся
 // на каждый snapshot (в т.ч. на каждый SSE-тик), пересборка графа там недопустима.
 let memoryViewsMounted = false;
+let memoryViews = null;         // тот же экземпляр: нужен, чтобы свернуть фуллскрин
 
 const ambient = new AmbientField(document.querySelector("#ambient"));
 
@@ -176,12 +195,17 @@ function statusLabel(value) {
     accepted: "принято", retry: "повтор", online: "на связи", offline: "не в сети",
     healthy: "здоров", degraded: "ослаблен", answered: "ответил", notified: "сообщено",
     applied: "применено", prepared: "подготовлено", intent: "намерение", active: "активно", revoked: "отозвано",
+    // ⚠ 03.08.2026. snapshot.now.state приходит одним из четырёх слов: active | ready |
+    // online | offline (praxis_app.snapshot, обе ветки). Слова ready в таблице не было —
+    // и её покой печатался бы на экране латиницей. Пилюли и подписи ниже читают now.state
+    // напрямую, поэтому таблица обязана покрывать весь словарь сервера.
+    ready: "наготове",
   })[String(value || "").toLowerCase()] || boundedText(value || "неизвестно", 38);
 }
 
 function statusTone(value) {
   const status = String(value || "").toLowerCase();
-  if (["done", "accepted", "online", "healthy", "applied", "notified", "active"].includes(status)) return "green";
+  if (["done", "accepted", "online", "healthy", "applied", "notified", "active", "ready"].includes(status)) return "green";
   if (["running", "pending", "prepared", "intent"].includes(status)) return "violet";
   if (["blocked", "paused", "retry", "answered", "degraded"].includes(status)) return "gold";
   if (["failed", "cancelled", "in_doubt", "offline", "revoked"].includes(status)) return "red";
@@ -855,6 +879,55 @@ function runsOf(snapshot = model.snapshot || {}) {
   return asList(snapshot.runs);
 }
 
+// ⚠ 03.08.2026. runsOf — это ВЫБОРКА (snapshot.runs.items), а не история. Рядом в том
+// же снимке лежат counts по манифестам и total; апп их не читал ни разу за 134 КБ кода,
+// поэтому 1990 успешных прогонов не существовали для экрана, и раздел выглядел аварийным.
+// Числа берём отсюда, карточки — из среза, и нигде не путаем одно с другим.
+function runsMeta(snapshot = model.snapshot || {}) {
+  return object(snapshot.runs);
+}
+
+function runsCounts(snapshot = model.snapshot || {}) {
+  return object(runsMeta(snapshot).counts);
+}
+
+// null, а не 0: «сервер не прислал числа» и «прогонов нет» — разные утверждения,
+// и второе нельзя печатать вместо первого.
+function runsCountOf(snapshot, statuses) {
+  const counts = runsCounts(snapshot);
+  let sum = 0;
+  let known = false;
+  statuses.forEach((status) => {
+    const value = Number(counts[String(status).toLowerCase()]);
+    if (Number.isFinite(value) && value >= 0) {
+      sum += value;
+      known = true;
+    }
+  });
+  return known ? sum : null;
+}
+
+function runsTotal(snapshot = model.snapshot || {}) {
+  const declared = Number(runsMeta(snapshot).total);
+  if (Number.isFinite(declared) && declared >= 0) return declared;
+  const summed = runsCountOf(snapshot, Object.keys(runsCounts(snapshot)));
+  if (summed !== null) return summed;
+  return runsOf(snapshot).length;
+}
+
+// Статусы, которых в срезе нет НИ ОДНОЙ карточкой, хотя в истории они есть.
+// Это и есть цена выборки, названная вслух.
+function runsMissingStatuses(snapshot = model.snapshot || {}) {
+  const present = new Set(runsOf(snapshot).map((run) => String(run.status || "").toLowerCase()));
+  return Object.entries(runsCounts(snapshot))
+    .map(([status, value]) => [String(status).toLowerCase(), Number(value)])
+    .filter(([status, value]) => Number.isFinite(value) && value > 0 && !present.has(status))
+    // Порядок — по величине. Object.entries отдаёт порядок, в котором ключи положил сервер,
+    // то есть для читателя случайный: пропавшие 1990 успехов могли оказаться после одного
+    // пропавшего blocked. Первым должно стоять то, чего не хватает больше всего.
+    .sort((a, b) => b[1] - a[1]);
+}
+
 function computerOf(snapshot = model.snapshot || {}) {
   return object(first(snapshot.computer, snapshot.windows, snapshot.body, {}));
 }
@@ -869,6 +942,66 @@ function memoryOf(snapshot = model.snapshot || {}) {
 
 function systemOf(snapshot = model.snapshot || {}) {
   return object(snapshot.system);
+}
+
+// ⚠ 03.08.2026. snapshot.now сервер собирает в КАЖДОМ снимке (praxis_app.snapshot):
+// state, active_runs, body_online, pending_followups, inbox_unread. Во всём app.js слова
+// snapshot.now не встречалось ни разу — шапка и герой вместо него спрашивали
+// snapshot.praxis, ключ, которого не существует ни в одной версии схемы. Промах падал в
+// литерал "online", то есть подпись под её именем говорила «на связи» безусловно: и когда
+// она работает, и когда снимок вообще без состояния. Утверждение без источника хуже
+// прочерка — прочерк виден, а зелёная надпись закрывает вопрос.
+function nowOf(snapshot = model.snapshot || {}) {
+  return object(snapshot.now);
+}
+
+function nowState(snapshot = model.snapshot || {}) {
+  return String(nowOf(snapshot).state || "");
+}
+
+function durationText(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  if (total < 60) return `${total}с`;
+  if (total < 3600) return `${Math.floor(total / 60)}м`;
+  if (total < 86400) return `${Math.floor(total / 3600)}ч ${Math.floor((total % 3600) / 60)}м`;
+  return `${Math.floor(total / 86400)}д ${Math.floor((total % 86400) / 3600)}ч`;
+}
+
+function gigabytes(megabytes) {
+  const value = Number(megabytes);
+  return Number.isFinite(value) && value >= 0 ? Math.round(value / 102.4) / 10 : null;
+}
+
+// ⚠ 03.08.2026. panel.server_state() отдаёт loadavg, cpus, mem{total_mb, available_mb},
+// disk{total_gb, free_gb}, uptime_sec, head и возраст каждого лога — и ни одно из этих
+// чисел в аппе не показывалось. Вместо них плитка «Контур» и раздел «Сервисы» просили
+// system.services: ключа с таким именем server_state() не возвращает никогда. Пустой
+// список давал unhealthy = 0, а ноль печатался словами «Контур устойчив» и «0 сервисов».
+// Зелёный вывод, сделанный ровно из нуля данных. Здесь числа читаются как есть, а
+// отсутствие фактов называется отсутствием фактов.
+function systemNumbers(system = {}) {
+  const mem = object(system.mem);
+  const disk = object(system.disk);
+  const logs = object(system.logs);
+  const load = String(system.loadavg || "").trim();
+  const diskFree = Number(disk.free_gb);
+  const diskTotal = Number(disk.total_gb);
+  return {
+    load: load ? load.split(" ")[0] : "",
+    loadFull: load,
+    cpus: Number(system.cpus) || 0,
+    memFreeGb: gigabytes(mem.available_mb),
+    memTotalGb: gigabytes(mem.total_mb),
+    diskFreeGb: disk.free_gb !== undefined && Number.isFinite(diskFree) ? diskFree : null,
+    diskTotalGb: disk.total_gb !== undefined && Number.isFinite(diskTotal) ? diskTotal : null,
+    uptimeSec: Number(system.uptime_sec) || 0,
+    logs: Object.entries(logs).filter(([, row]) => row && typeof row === "object"),
+    error: system.error ? String(system.error) : "",
+  };
+}
+
+function systemKnown(sys) {
+  return Boolean(sys.loadFull) || sys.memTotalGb !== null || sys.diskTotalGb !== null || sys.uptimeSec > 0;
 }
 
 function inboxOf(snapshot = model.snapshot || {}) {
@@ -905,11 +1038,14 @@ function applySnapshot(snapshot, { stale = false, verifiedAt = Date.now() } = {}
 }
 
 function renderHeader(snapshot) {
-  const praxis = object(snapshot.praxis);
-  const system = systemOf(snapshot);
-  const status = String(first(praxis.status, praxis.state, system.status, "online"));
-  const online = !["offline", "failed", "down"].includes(status.toLowerCase());
-  ui.brandState.textContent = boundedText(first(praxis.label, praxis.state_label, statusLabel(status)), 45);
+  // ⚠ 03.08.2026. Было: first(praxis.status, praxis.state, system.status, "online") —
+  // три несуществующих ключа и литерал в конце. Из четырёх кандидатов работал ровно
+  // последний, поэтому огонёк рядом с именем горел всегда, а подпись всегда читалась
+  // «на связи». Теперь и подпись, и огонёк берутся из now.state, а снимок без состояния
+  // честно называется снимком без состояния — гасить огонёк на этом правильно.
+  const state = nowState(snapshot);
+  const online = Boolean(state) && !["offline", "failed", "down"].includes(state.toLowerCase());
+  ui.brandState.textContent = boundedText(state ? statusLabel(state) : "состояние не приехало", 45);
   ui.brandPulse.classList.toggle("is-live", online);
 }
 
@@ -930,35 +1066,63 @@ function followupsOf(telegram) {
   return asList(first(telegram.followups, telegram.obligations, []));
 }
 
+// ⚠ 03.08.2026. Правило отбора одно и живёт на сервере (praxis_app._telegram): в счёт
+// идут только ЗАКАЗАННЫЕ Егором отчёты, остальные нити — её собственный след, и
+// зеркалить его бейджем он просил не надо. Здесь правило было пересказано по памяти
+// и разошлось дважды: notify_owner не проверялся вовсе, а !notified_at был
+// тождественно истинным (обоих полей в карточке не было). Пересказ убран: признаки
+// те же, что у сервера, поэтому бейдж плитки равен telegram.pending_followups, а не
+// «всем нитям, какие приехали».
 function pendingFollowups(telegram) {
-  return followupsOf(telegram).filter((row) => ["pending", "answered"].includes(String(row.status || "pending").toLowerCase()) && !row.notified_at);
+  return followupsOf(telegram).filter((row) => row.notify_owner
+    && ["pending", "answered"].includes(String(row.status || "pending").toLowerCase()));
 }
 
 function renderNow(snapshot) {
-  const praxis = object(snapshot.praxis);
   const computer = computerOf(snapshot);
   const telegram = telegramOf(snapshot);
   const memory = memoryOf(snapshot);
   const system = systemOf(snapshot);
+  const now = nowOf(snapshot);
   const active = activeRuns(snapshot);
   const attention = attentionRuns(snapshot);
   const pending = pendingFollowups(telegram);
   const unread = inboxUnread(snapshot);
   const online = bodyOnline(computer);
-  const status = String(first(praxis.status, praxis.state, system.status, online ? "online" : "offline"));
-  const healthy = !["offline", "failed", "down"].includes(status.toLowerCase());
+  // ⚠ 03.08.2026. Пять строк ниже спрашивали praxis.status / praxis.title / praxis.summary
+  // и т.д. — ключа snapshot.praxis не существует, поэтому КАЖДАЯ из них печатала свой
+  // литерал: «Живой контур», «Praxis на связи», «Состояние собрано из durable runs…».
+  // Экран сообщал Егору благополучие вообще без входных данных. Имя переменной status
+  // сохранено намеренно: ниже им же кормится ambient.setState({ phase }), и живая краска
+  // теперь окрашивается настоящим состоянием, а не литералом.
+  const status = nowState(snapshot);
+  const known = Boolean(status);
+  const healthy = known && !["offline", "failed", "down"].includes(status.toLowerCase());
+  // active_runs сервер считает по ВСЕМ манифестам, а active[] — по срезу снимка; при
+  // расхождении верить надо счётчику, срез его не видит целиком.
+  const openRuns = first(now.active_runs, active.length);
 
   document.querySelector("#heroDot")?.classList.toggle("is-offline", !healthy);
-  setText("#heroEyebrow", healthy ? "Живой контур" : "Контур требует связи");
-  setText("#heroTitle", first(praxis.title, praxis.now, active[0]?.goal, healthy ? "Praxis на связи" : "Praxis ждёт восстановление"));
-  setText("#heroSummary", first(praxis.summary, praxis.detail, active[0]?.summary, "Состояние собрано из durable runs, server receipts и карт памяти."));
-  setText("#heroRuns", active.length);
+  setText("#heroEyebrow", known ? `Praxis · ${statusLabel(status)}` : "Состояние не приехало");
+  setText("#heroTitle", first(active[0]?.goal, known
+    ? (Number(openRuns) > 0 ? `${openRuns} незакрытых прогонов` : "Незакрытых прогонов нет")
+    : "Снимок пришёл без состояния"));
+  setText("#heroSummary", first(active[0]?.summary, "Состояние собрано из durable runs, server receipts и карт памяти."));
+  setText("#heroRuns", openRuns);
   setText("#heroBody", online ? "online" : "offline");
   setText("#heroFollowups", unread);
   setText("#heroRevision", model.revision ? `rev ${model.revision}` : "rev —");
 
-  setText("#tileRunsTitle", active[0]?.goal || (runsOf(snapshot).length ? "Активных нет" : "Пока пусто"));
-  setText("#tileRunsSub", active.length ? `${active.length} в движении · ${attention.length} требуют внимания` : `${runsOf(snapshot).length} в истории`);
+  const moving = active.filter((run) => MOVING_STATUSES.has(String(run.status || "").toLowerCase()));
+  const runsHistory = runsTotal(snapshot);
+  // ⚠ 03.08.2026. Здесь под словом «в истории» печаталась длина среза, runsOf(...).length:
+  // выборка выдавалась за прожитую работу — 74 против 2120 в runs.total, занижение в 28 раз.
+  // (Дословную старую строку тут не цитирую: тест ловит её как признак отката.) И ровно она делала
+  // раздел «весь красный»: успешных карточек в срезе нет, поэтому история читалась как список
+  // аварий. Счётчики «в движении» и «требуют внимания» остаются по срезу — это карточки,
+  // которые действительно можно открыть; «всего» — по манифестам сервера.
+  setText("#tileRunsTitle", moving[0]?.goal || (active.length ? "Ничего не движется" : (runsHistory ? "Активных нет" : "Пока пусто")));
+  setText("#tileRunsSub", `${moving.length} в движении · ${attention.length} требуют внимания · ${runsHistory} всего`);
   showBadge("#tileRunsBadge", attention.length);
   showBadge("#navRunsBadge", attention.length);
   showBadge("#navNowBadge", unread);
@@ -969,18 +1133,43 @@ function renderNow(snapshot) {
 
   const maps = asList(memory.maps);
   setText("#tileMemoryTitle", maps.length ? `${maps.length} карт` : "Карты памяти");
-  setText("#tileMemorySub", first(memory.summary, memory.index_status, `${count(memory.records)} записей · provenance`));
+  // ⚠ 03.08.2026. memory.records в снимке нет и не было: _memory_health отдаёт
+  // canonical/maps/index/raw_journal_is_normative. count(undefined) возвращает 0 —
+  // не «не знаю», а уверенный ноль, — и плитка писала «0 записей · provenance»
+  // при 436 566 кусках и 7 644 источниках в index. Ноль про её память читается как
+  // «памяти нет». Берём то, что сервер действительно посчитал, и оговариваем
+  // роль индекса: он пересобираемая навигация, а не канон.
+  const memoryIndex = object(memory.index);
+  const indexChunks = Number(memoryIndex.chunks) || 0;
+  setText("#tileMemorySub", first(memory.summary, memory.index_status,
+    memoryIndex.available === false
+      ? "индекс не собран · канон в Markdown/JSONL"
+      : `${indexChunks} кусков индекса · ${Number(memoryIndex.sources) || 0} источников`));
 
   const rooms = asList(telegram.rooms);
   setText("#tileTelegramTitle", rooms.length ? `${rooms.length} комнат` : "Нити Telegram");
   setText("#tileTelegramSub", pending.length ? `${pending.length} ждут продолжения` : "follow-ups закрыты");
   showBadge("#tileTelegramBadge", pending.length);
 
-  const services = asList(system.services);
-  const unhealthy = services.filter((service) => !["healthy", "running", "online", "ok"].includes(String(service.status || service.state || "").toLowerCase())).length;
-  setText("#tileSystemTitle", unhealthy ? `${unhealthy} требуют внимания` : "Контур устойчив");
-  setText("#tileSystemSub", first(system.summary, `${services.length} сервисов · owner-rooted trust`));
-  showBadge("#navMoreBadge", unhealthy);
+  // ⚠ 03.08.2026. Прежняя плитка считала «нездоровые сервисы» в списке, которого нет:
+  // system.services не возвращает ни server_state(), ни _system(). Пустой список давал
+  // unhealthy = 0 и плитка писала «Контур устойчив · 0 сервисов». Ни то, ни другое не было
+  // измерено. Теперь на плитке ровно то, что сервер прочитал из /proc и с диска, а бейдж
+  // зажигается только когда сервер ЧЕСТНО сказал, что состояние не прочиталось (_system()
+  // кладёт "error" в этот же объект). Отсутствие фактов — не повод для тревоги и не повод
+  // для зелёного: это отдельная, названная вслух третья возможность.
+  const sys = systemNumbers(system);
+  const sysKnown = systemKnown(sys);
+  setText("#tileSystemTitle", sys.error ? "Сервер не отдал состояние"
+    : sysKnown ? `LA ${sys.load || "—"} · ${sys.cpus || "?"} CPU`
+      : "Состояния сервера в снимке нет");
+  setText("#tileSystemSub", sys.error ? boundedText(sys.error, 80)
+    : sysKnown ? [
+      sys.memFreeGb !== null && sys.memTotalGb !== null ? `RAM ${sys.memFreeGb} из ${sys.memTotalGb} ГБ` : "",
+      sys.diskFreeGb !== null && sys.diskTotalGb !== null ? `диск ${sys.diskFreeGb} из ${sys.diskTotalGb} ГБ` : "",
+      sys.uptimeSec ? `аптайм ${durationText(sys.uptimeSec)}` : "",
+    ].filter(Boolean).join(" · ") : "фактов о сервере не приехало");
+  showBadge("#navMoreBadge", sys.error ? 1 : 0);
 
   const observed = first(snapshot.generated_at, snapshot.observed_at, snapshot.updated_at);
   setText("#snapshotAge", observed ? relativeTime(observed) : "live");
@@ -1141,12 +1330,24 @@ function openDeliveryAction(deliveryId, trigger) {
   toast("У этого входящего нет безопасного встроенного действия — детали сохранены в карточке.", "info", 4200);
 }
 
+// ⚠ 03.08.2026. Вкладка «Готовые» спрашивала TERMINAL_STATUSES = done + cancelled + failed.
+// Успешных карточек в срезе нет вообще — значит вкладка показывала ровно 73 УПАВШИХ прогона
+// под словом «готовые», то есть переименовывала поражения в успехи. Это хуже умолчания:
+// умолчание скрывает факт, а это его переворачивает. Успех — это done и только done.
+const DONE_STATUSES = new Set(["done"]);
+// Таблица вместо лесенки if: подпись кнопки в разметке и предикат теперь сверяются тестом
+// (test_app_runs.py), иначе они расходятся молча — как и разошлись.
+const RUN_FILTER_STATUSES = new Map([
+  ["all", null],
+  ["active", ACTIVE_STATUSES],
+  ["attention", ATTENTION_STATUSES],
+  ["done", DONE_STATUSES],
+]);
+
 function runMatchesFilter(run) {
   const status = String(run.status || "").toLowerCase();
-  if (model.runFilter === "active") return ACTIVE_STATUSES.has(status);
-  if (model.runFilter === "attention") return ATTENTION_STATUSES.has(status);
-  if (model.runFilter === "done") return TERMINAL_STATUSES.has(status);
-  return true;
+  const allowed = RUN_FILTER_STATUSES.get(model.runFilter);
+  return allowed ? allowed.has(status) : true;
 }
 
 function runCard(run) {
@@ -1175,11 +1376,83 @@ function runCard(run) {
   return button;
 }
 
+// ⚠ 03.08.2026. statusLabel отдаёт именительный падеж единственного числа: «готов», «отменён».
+// В строке «Ни одной карточки в срезе: готов (1990)» это читается как обрывок, а не как факт
+// про 1990 прогонов. Нужен родительный множественного, и отдельной таблицей: statusLabel живёт
+// в плашках статуса каждой карточки, и менять падеж ТАМ значит сломать их ради этой строки.
+const RUN_STATUS_PLURAL = {
+  done: "успешных", failed: "упавших", cancelled: "отменённых", blocked: "заблокированных",
+  paused: "на паузе", in_doubt: "требующих сверки", pending: "ожидающих", running: "идущих",
+};
+
+// Сводка по манифестам сервера: пять чисел и одна фраза о границе среза. Стоит НАД списком,
+// потому что без неё список — утверждение «вот вся история Праксис», а он ею не является.
+function renderRunsSummary(snapshot) {
+  const box = document.querySelector("#runsSummary");
+  if (!box) return;
+  const counts = runsCounts(snapshot);
+  if (!Object.keys(counts).length) {
+    // Снимок без counts (старый сервер или ошибка сборки среза): молчим. Нарисовать нули
+    // здесь значило бы выдумать поле — это ложь на экране, а не деградация.
+    box.hidden = true;
+    replace(box);
+    return;
+  }
+  box.hidden = false;
+  const shown = runsOf(snapshot).length;
+  const total = runsTotal(snapshot);
+  const metrics = element("div", "runs-summary__metrics");
+  [
+    [total, "всего"],
+    [runsCountOf(snapshot, ["done"]) ?? "—", "успешно"],
+    [runsCountOf(snapshot, ["failed"]) ?? "—", "ошибка"],
+    [runsCountOf(snapshot, ["cancelled"]) ?? "—", "отменено"],
+    [runsCountOf(snapshot, [...ACTIVE_STATUSES]) ?? "—", "открытых"],
+  ].forEach(([value, label]) => {
+    const cell = element("span");
+    cell.append(element("strong", "", value), element("small", "", label));
+    metrics.append(cell);
+  });
+  const note = element(
+    "small",
+    "runs-summary__note",
+    shown >= total
+      ? `Показаны все ${total}.`
+      : `Показаны ${shown} из ${total}: снимок держит живые и требующие внимания, за остальными нужен отдельный запрос — его в API пока нет.`,
+  );
+  const missing = runsMissingStatuses(snapshot);
+  const gap = missing.length
+    ? element(
+      "small",
+      "runs-summary__note",
+      `Ни одной карточки в срезе: ${missing.map(([status, value]) => `${RUN_STATUS_PLURAL[status] || statusLabel(status)} — ${value}`).join(", ")}.`,
+    )
+    : null;
+  replace(box, metrics, note, gap);
+}
+
+// ⚠ 03.08.2026. Прежняя пустота говорила «История появится после durable execution» —
+// под вкладкой успешных это прямое отрицание 1990 уже прожитых прогонов. Считаем по counts:
+// если такие прогоны есть, но в срезе их нет, так и пишем — и называем причину.
+function runsEmptyState(snapshot) {
+  const allowed = RUN_FILTER_STATUSES.get(model.runFilter);
+  const inHistory = allowed ? runsCountOf(snapshot, [...allowed]) : runsTotal(snapshot);
+  if (Number.isFinite(inHistory) && inHistory > 0) {
+    return emptyState(
+      `Таких прогонов ${inHistory}, но их нет в срезе`,
+      "Снимок отдаёт карточками только живые и требующие внимания. Открыть остальные из аппа пока нельзя: маршрута за историей в API нет.",
+      "runs",
+    );
+  }
+  return emptyState(model.runFilter === "all" ? "Runs пока нет" : "В этом фильтре пусто", "История появится после durable execution.", "runs");
+}
+
 function renderRuns(snapshot) {
   const target = document.querySelector("#runsList");
+  renderRunsSummary(snapshot);
   const rows = runsOf(snapshot).filter(runMatchesFilter);
   if (!rows.length) {
-    replace(target, emptyState(model.runFilter === "all" ? "Runs пока нет" : "В этом фильтре пусто", "История появится после durable execution.", "runs"));
+    replace(target, runsEmptyState(snapshot));
     return;
   }
   replace(target, ...rows.map(runCard));
@@ -1206,10 +1479,27 @@ function renderComputer(snapshot) {
   const capabilityCount = Array.isArray(capabilitySource)
     ? capabilitySource.length
     : Object.values(object(capabilitySource)).filter(Boolean).length;
+  // ⚠ 03.08.2026. computer.inventory приезжает в КАЖДОМ снимке с 21.07 (praxis_app._inventory:
+  // hostname, os, machine, volumes, tools, apps_count, projects_count, observed_at) и не был
+  // показан нигде: единственным вхождением слова inventory во всём app.js было имя команды
+  // inventory.refresh. Кнопка «обновить карту машины» существовала, сама карта — нет.
+  // Снятая карта (available:false) называется снятой, а не рисуется пустыми значениями.
+  const inventory = object(computer.inventory);
+  const inventoryOs = object(inventory.os);
+  const inventoryFacts = inventory.available ? [
+    [boundedText(first(inventory.hostname, "—"), 40), "hostname"],
+    [boundedText(first(inventoryOs.caption, inventoryOs.version, "—"), 40), "ОС"],
+    [asList(inventory.volumes).length, "томов"],
+    [asList(inventory.tools).length, "инструментов"],
+    [Number(inventory.apps_count) || 0, "приложений"],
+    [Number(inventory.projects_count) || 0, "проектов"],
+    [first(inventory.observed_at, inventory.captured_at) ? relativeTime(first(inventory.observed_at, inventory.captured_at)) : "—", "снято"],
+  ] : [[inventory.state === "scope_required" ? "нет доступа" : "не собрана", "inventory"]];
   [
     [first(identity.integrity, device.integrity, "—"), "integrity"],
     [first(computer.probe_execution, device.execution, "—"), "route"],
     [capabilityCount, "capabilities"],
+    ...inventoryFacts,
   ].forEach(([value, label]) => {
     const fact = element("span", "device-fact");
     fact.append(element("strong", "", value), element("small", "", label));
@@ -1217,10 +1507,16 @@ function renderComputer(snapshot) {
   });
   replace(target, head, facts);
 
-  const processes = asList(first(computer.processes, computer.operations, []));
-  setText("#processCount", processes.length);
+  // ⚠ 03.08.2026. computer.processes и computer.operations не существуют: snapshot()
+  // собирает computer из _body_status + inventory + evidence + capabilities, перечня
+  // запущенного там нет по построению. Раздел поэтому показывал «0» и «Управляемых
+  // процессов нет» — фразу, которая утверждает, что процессов НЕТ, тогда как правда в
+  // том, что их нечем посмотреть. Догадка про operations убрана, пустота названа своим
+  // именем; чтобы здесь появились живые процессы, нужен новый источник в снимке.
+  const processes = asList(computer.processes);
+  setText("#processCount", processes.length ? processes.length : "—");
   const processTarget = document.querySelector("#processList");
-  replace(processTarget, ...(processes.length ? processes.map(processCard) : [emptyState("Управляемых процессов нет", "Запущенные через Praxis процессы появятся здесь.", "process")]));
+  replace(processTarget, ...(processes.length ? processes.map(processCard) : [emptyState("Снимок не несёт списка процессов", "Тело отвечает на probe, но перечня запущенного в snapshot нет. Запущенное самой Praxis — в разделе Runs.", "process")]));
 
   const artifacts = asList(first(computer.artifacts, computer.evidence, []));
   setText("#artifactCount", artifacts.length);
@@ -1277,8 +1573,22 @@ function artifactCard(artifact) {
   iconBox.append(svgIcon("artifact"));
   const body = element("span", "stack-card__body");
   body.append(
-    element("strong", "", first(artifact.name, artifact.filename, artifact.artifact_id, "Артефакт")),
-    element("small", "", [bytes(artifact.size), artifact.sha256 ? `sha ${String(artifact.sha256).slice(0, 10)}` : "", relativeTime(first(artifact.at, artifact.created_at))].filter(Boolean).join(" · ")),
+    // ⚠ 03.08.2026. Эта же карточка рисует ДВА разных потока. У артефактов run’а
+    // есть name/size/sha256; у computer.evidence (praxis_app._computer_evidence)
+    // их нет вовсе — там id/at/capability/status/subject/summary. Ни одного из
+    // прежних ключей не совпадало, поэтому все 13 строк раздела назывались словом
+    // «Артефакт», а подписью шло «— · 2д»: минус приезжал из bytes(undefined),
+    // который возвращает «—» и проходит filter(Boolean) как настоящее значение.
+    // Экран показывал ровно тринадцать одинаковых строк там, где лежат тринадцать
+    // разных доказательств. Ключи evidence дописаны В КОНЕЦ цепочки — приоритет
+    // артефактов не тронут, а размер печатается только когда он есть.
+    element("strong", "", first(artifact.name, artifact.filename, artifact.artifact_id, artifact.subject, artifact.capability, "Артефакт")),
+    element("small", "", [
+      artifact.size !== undefined ? bytes(artifact.size) : "",
+      artifact.sha256 ? `sha ${String(artifact.sha256).slice(0, 10)}` : "",
+      boundedText(first(artifact.summary, artifact.capability, ""), 140),
+      relativeTime(first(artifact.at, artifact.created_at)),
+    ].filter(Boolean).join(" · ")),
   );
   card.append(iconBox, body);
   const href = !model.snapshotStale && navigator.onLine
@@ -1332,7 +1642,16 @@ function renderMemory(snapshot) {
     element("strong", "", first(memory.status_label, memory.status === "error" ? "Индекс требует внимания" : "Навигация пересобираема")),
     element("small", "", first(memory.summary, "Markdown/JSONL — канон; карты и SQL — проекции.")),
   );
-  row.append(ring, copy, statusPill(first(memory.status, index.status, "healthy")));
+  // ⚠ 03.08.2026. Ни memory.status, ни index.status в снимке не существует —
+  // значит пилюля печатала литерал "healthy" ВСЕГДА, включая случай, когда
+  // recall.sqlite3 отсутствует или не читается. Сервер про это честен и отдаёт
+  // index.available и index.error; зелёный без источника хуже отсутствия пилюли,
+  // потому что закрывает вопрос. Отдельно: available:false здесь НЕ авария —
+  // индекс пересобираем, канон лежит в Markdown/JSONL, поэтому статус «ослаблен»,
+  // а не «ошибка».
+  const indexHealth = index.error ? "failed"
+    : index.available === false ? "degraded" : "healthy";
+  row.append(ring, copy, statusPill(first(memory.status, index.status, indexHealth)));
   const metrics = element("div", "health-metrics");
   [
     [first(index.chunks, memory.fts_chunks, 0), "chunks"],
@@ -1348,8 +1667,15 @@ function renderMemory(snapshot) {
   const defaultMaps = ["PEOPLE", "ROOMS", "PROJECTS", "THREADS", "RUNS", "COMPUTERS"].map((name) => ({ name }));
   const maps = asList(memory.maps);
   const target = document.querySelector("#memoryMaps");
-  replace(target, ...(maps.length ? maps : defaultMaps).map(mapCard));
-  document.querySelector("#memorySearch").hidden = !hasScope("praxis.snapshot", snapshot);
+  // ⚠ 03.08.2026. Сетка карт рисовалась безусловно, хотя соседняя строка уже прячет
+  // поиск без scope praxis.snapshot. Зритель без этого scope получал шесть нажимаемых
+  // карточек, и каждая отвечала 403: гейт у чтения карты ровно тот же — ветка
+  // map.read в praxis_app требует praxis.snapshot.
+  const mayReadMemory = hasScope("praxis.snapshot", snapshot);
+  replace(target, ...(mayReadMemory
+    ? (maps.length ? maps : defaultMaps).map(mapCard)
+    : [emptyState("Карты закрыты", "Чтение карт памяти требует доступа praxis.snapshot.", "map")]));
+  document.querySelector("#memorySearch").hidden = !mayReadMemory;
   const rebuild = document.querySelector("[data-command='memory.rebuild']");
   rebuild.hidden = !hasScope("praxis.work", snapshot);
   rebuild.disabled = rebuild.hidden;
@@ -1372,10 +1698,18 @@ function mountMemoryViews(snapshot) {
     view.append(mount);
   }
   memoryViewsMounted = true;
-  initMemoryViews({
+  memoryViews = initMemoryViews({
     mount,
     api: (path) => api(path),
     sheet: (title, body) => openSheet({ title, eyebrow: "Память", content: body }),
+    // Хост полноэкранного слоя лежит в #app, но вне `.view` — почему именно так,
+    // расписано в praxisapp.html. Если его нет (оболочка из старого кэша),
+    // initMemoryViews просто спрячет кнопку «Развернуть»: мёртвой она не будет.
+    fullscreenHost: document.querySelector("#stageFullscreen"),
+    onFullscreen: (active) => {
+      model.memoryFullscreen = Boolean(active);
+      updateBack();
+    },
     onError: (error) => {
       if (error?.status === 401 || error?.sessionLocked || error?.network) return;
       toast(error?.message || "Память не отдала проекцию", "error", 3600);
@@ -1383,38 +1717,58 @@ function mountMemoryViews(snapshot) {
   });
 }
 
+// ⚠ 03.08.2026. Карточка читала у карты поле count — которого в снимке нет и не было:
+// praxis_app._memory_health отдаёт про карту ровно {id, name, available, updated_at,
+// bytes}. Ветка была мёртвой, зато подпись «Открыть bounded map» одинаково бодро
+// стояла и под живой картой, и под отсутствующим файлом: карта с available:false
+// выглядела открываемой и по нажатию отвечала голым not_found. Теперь карточка
+// говорит только то, что снимок знает — размер и когда карта обновлялась.
 function mapCard(map) {
   const card = element("button", "map-card");
   card.type = "button";
   const name = String(first(map.name, map.id, map.slug, "MAP")).toUpperCase();
   card.dataset.memoryMap = name;
   card.append(svgIcon(name === "COMPUTERS" ? "computer" : name === "RUNS" ? "runs" : "map"));
-  card.append(element("strong", "", name), element("small", "", first(map.summary, map.description, "Открыть bounded map")));
-  if (map.count !== undefined) card.append(element("span", "map-count", map.count));
+  const available = map.available !== false;
+  const facts = available
+    ? [map.bytes ? bytes(map.bytes) : "", map.updated_at ? relativeTime(map.updated_at) : ""]
+      .filter(Boolean).join(" · ")
+    : "файла нет на диске";
+  card.append(element("strong", "", name), element("small", "", facts || "Открыть карту"));
+  card.disabled = !available;
   return card;
 }
 
 function renderTelegram(snapshot) {
   const telegramState = telegramOf(snapshot);
-  const pulse = object(first(telegramState.social_pulse, telegramState.pulse, {}));
+  const followups = followupsOf(telegramState);
+  const rooms = asList(telegramState.rooms);
+  // ⚠ 03.08.2026. Здесь стояла карточка «Социальный пульс» с зелёной пилюлей «здоров»,
+  // собранная ЦЕЛИКОМ из литералов: ни social_pulse, ни pulse снимок не отдаёт
+  // (_telegram — это ровно rooms, followups, pending_followups, membership). Заголовок,
+  // подпись «часовой обзор обещаний и ответов» и статус были написаны здесь и здесь же
+  // прочитаны — утверждение о здоровье механизма без единого факта о нём. Пока источника
+  // нет, карточка говорит только то, что действительно приехало, — состав раздела, — а
+  // молчание о самом пульсе названо вслух, а не закрашено зелёным.
   const pulseTarget = document.querySelector("#socialPulse");
+  const ordered = Number(telegramState.pending_followups);
   const row = element("div", "social-row");
   const sigil = element("span", "social-sigil");
   sigil.append(svgIcon("telegram"));
   const copy = element("span", "social-copy");
   copy.append(
-    element("strong", "", first(pulse.title, pulse.active ? "Социальный пульс смотрит нити" : "Социальный пульс")),
-    element("small", "", first(pulse.summary, pulse.next_at ? `следующий ${relativeTime(pulse.next_at)}` : "часовой обзор обещаний и ответов")),
+    element("strong", "", `${rooms.length} комнат · ${followups.length} нитей`),
+    element("small", "", Number.isFinite(ordered)
+      ? `${ordered} заказанных отчётов ждут ответа · о самом пульсе снимок не сообщает`
+      : "о состоянии социального пульса снимок не сообщает"),
   );
-  row.append(sigil, copy, statusPill(first(pulse.status, pulse.active ? "running" : "healthy")));
+  row.append(sigil, copy);
   replace(pulseTarget, row);
 
-  const followups = followupsOf(telegramState);
   setText("#followupCount", followups.length);
   const followupTarget = document.querySelector("#followupList");
   replace(followupTarget, ...(followups.length ? followups.map(followupCard) : [emptyState("Открытых ожиданий нет", "Когда Praxis напишет кому-то по просьбе, нить появится здесь.", "followup")]));
 
-  const rooms = asList(telegramState.rooms);
   const roomTarget = document.querySelector("#roomList");
   replace(roomTarget, ...(rooms.length ? rooms.map(roomCard) : [emptyState("Комнаты ещё не синхронизированы", "Вход и выход проходят через durable membership ledger.", "telegram")]));
 
@@ -1450,17 +1804,38 @@ function followupCard(item) {
   return card;
 }
 
+// Тон пилюли — это оформление, а не пересказ: слово в пилюлю кладёт сервер.
+const ROOM_MODE_TONE = { frozen: "red", dead: "red", quiet: "gold", observer: "violet", normal: "green" };
+
 function roomCard(room) {
   const card = element("div", "stack-card");
   const iconBox = element("span", "stack-card__icon");
   iconBox.append(svgIcon("telegram"));
   const body = element("span", "stack-card__body");
+  // ⚠ 03.08.2026. Пилюля просила room.status (такого ключа нет), падала на room.mode и
+  // печатала сырой идентификатор: statusLabel не знает ни frozen, ни quiet, ни observer,
+  // ни dead, ни normal, поэтому на экране Егора стояла латиница. Рядом лежало готовое
+  // русское mode_word, а с ним — весь провенанс, ради которого он 28.07 и добавлялся:
+  // причина режима, срок, ЧЕЙ это режим и раскрыта ли её визитка. Панель свой пересказ
+  // тогда же убрала — «два пересказа одного факта расходятся всегда»; убираем и здесь.
+  // Комната, которую ей молча притушили, не должна выглядеть как её собственный выбор.
+  const mode = String(room.mode || "").toLowerCase();
+  const detail = [
+    room.reason ? boundedText(room.reason, 90) : "",
+    room.until ? `до ${relativeTime(room.until)}` : "",
+    room.author ? `режим · ${boundedText(room.author, 40)}` : "",
+    String(room.disclosure || "") === "open"
+      ? `визитка раскрыта${room.disclosure_author ? ` (${boundedText(room.disclosure_author, 40)})` : ""}`
+      : "",
+  ].filter(Boolean).join(" · ");
   body.append(
     element("strong", "", first(room.title, room.name, room.id, "Комната")),
-    element("small", "", [first(room.mode, room.engagement), room.topics !== undefined ? `${count(room.topics)} топиков` : ""].filter(Boolean).join(" · ")),
+    element("small", "", detail || "повода и срока у режима не записано"),
   );
   const meta = element("span", "stack-card__meta");
-  meta.append(statusPill(first(room.status, room.mode, "online")));
+  const modePill = element("span", "status-pill", boundedText(first(room.mode_word, room.mode, "режим неизвестен"), 38));
+  modePill.dataset.tone = ROOM_MODE_TONE[mode] || "cyan";
+  meta.append(modePill);
   if (room.can_leave !== false && first(room.id, room.peer_id)) {
     const leave = element("button", "text-button", "Выйти");
     leave.type = "button";
@@ -1546,9 +1921,30 @@ function renderMore(snapshot) {
 
   const system = systemOf(snapshot);
   setText("#systemHead", first(system.head, system.commit, "HEAD —"));
-  const services = asList(system.services);
+  // ⚠ 03.08.2026. Раздел назывался «Сервисы» и ждал system.services — ключа, которого
+  // server_state() не возвращает никогда. Итог: вечная заглушка «Сервисы не прислали
+  // состояние» под пустым разделом, при том что рядом, в том же объекте, лежали
+  // нагрузка, память, диск, аптайм и возраст трёх логов. Заглушка была честной по форме
+  // и лживой по существу: сервер прислал ровно то, что умеет, спрашивали не о том.
+  const sys = systemNumbers(system);
+  const factRows = [];
+  if (sys.error) factRows.push(["Состояние сервера не прочиталось", boundedText(sys.error, 160), "failed"]);
+  if (sys.loadFull) factRows.push(["Нагрузка", `${sys.loadFull} · ${sys.cpus || "?"} CPU`, ""]);
+  if (sys.memTotalGb !== null) factRows.push(["Память", `${sys.memFreeGb} ГБ свободно из ${sys.memTotalGb} ГБ`, ""]);
+  if (sys.diskTotalGb !== null) factRows.push(["Диск", `${sys.diskFreeGb} ГБ свободно из ${sys.diskTotalGb} ГБ`, ""]);
+  if (sys.uptimeSec) factRows.push(["Аптайм процесса", durationText(sys.uptimeSec), ""]);
+  sys.logs.forEach(([name, row]) => factRows.push([
+    `Лог ${name}`,
+    [
+      Number.isFinite(Number(row.age_sec)) ? `последняя запись ${durationText(row.age_sec)} назад` : "",
+      Number.isFinite(Number(row.size_kb)) ? `${Number(row.size_kb)} КБ` : "",
+    ].filter(Boolean).join(" · "),
+    "",
+  ]));
   const serviceTarget = document.querySelector("#serviceList");
-  replace(serviceTarget, ...(services.length ? services.map(serviceCard) : [emptyState("Сервисы не прислали состояние", "Snapshot остаётся честно неполным.", "system")]));
+  replace(serviceTarget, ...(factRows.length
+    ? factRows.map(([title, detail, tone]) => systemFactCard(title, detail, tone))
+    : [emptyState("Сервер не прислал состояние", "panel.server_state() читает /proc и диск хоста; если фактов нет — подставить их нечем.", "system")]));
   document.querySelectorAll("#view-more [data-command]").forEach((button) => {
     const scope = button.dataset.command === "system.restart"
       ? "praxis.system.control"
@@ -1602,16 +1998,19 @@ function deviceCard(device, owner) {
   return card;
 }
 
-function serviceCard(service) {
+// ⚠ 03.08.2026. Здесь была serviceCard — карточка для строк system.services. Раз такого
+// ключа нет и никогда не было, карточка не вызывалась ни разу за всё время жизни аппа, но
+// исправно подсказывала следующему читателю, что сервисы «вот-вот приедут». Заменена
+// карточкой факта: она печатает то, что сервер измерил, и пилюлю показывает только тогда,
+// когда состояние ему известно.
+function systemFactCard(title, detail, tone) {
   const card = element("div", "stack-card");
   const iconBox = element("span", "stack-card__icon");
   iconBox.append(svgIcon("system"));
   const body = element("span", "stack-card__body");
-  body.append(
-    element("strong", "", first(service.name, service.unit, service.id, "Сервис")),
-    element("small", "", first(service.detail, service.summary, service.uptime ? `uptime ${service.uptime}` : "runtime")),
-  );
-  card.append(iconBox, body, statusPill(first(service.status, service.state, "unknown")));
+  body.append(element("strong", "", title), element("small", "", detail));
+  card.append(iconBox, body);
+  if (tone) card.append(statusPill(tone));
   return card;
 }
 
@@ -1649,14 +2048,21 @@ function scrubProtectedSurface(reason) {
     else button.removeAttribute("aria-current");
   });
   document.querySelectorAll("[data-open]").forEach((button) => { button.hidden = true; });
-  destroyMemoryViews();
+  destroyMemoryViews();          // сначала свернёт фуллскрин и вернёт сцену в ленту
   memoryViewsMounted = false;
+  memoryViews = null;
+  model.memoryFullscreen = false;
   [
-    "#runsList", "#deviceHero", "#processList", "#artifactList", "#memoryHealth",
+    "#runsList", "#runsSummary", "#deviceHero", "#processList", "#artifactList", "#memoryHealth",
     "#memoryMaps", "#memoryResults", "#socialPulse", "#followupList", "#roomList",
     "#membershipList", "#trustSummary", "#grantList", "#deviceSummary", "#deviceList",
     "#serviceList",
   ].forEach((selector) => document.querySelector(selector)?.replaceChildren());
+  // replaceChildren() убирает содержимое, но не сам блок: .runs-summary — коробка glass с рамкой,
+  // и после первого renderRuns она живёт с hidden=false. Без этой строки после реавторизации и
+  // до первого снимка на экране висела бы пустая рамка ни о чём. Возвращаем ровно то состояние,
+  // в котором сводка приезжает из разметки (hidden), — второй половиной той же уборки.
+  document.querySelector("#runsSummary")?.setAttribute("hidden", "");
   [
     ["#tileRunsTitle", "—"], ["#tileRunsSub", "—"],
     ["#tileComputerTitle", "—"], ["#tileComputerSub", "—"],
@@ -1714,13 +2120,26 @@ function back() {
     closeSheet();
     return;
   }
+  // ⚠ Порядок веток — смысловой, а не косметический. Досье узла открывается ПОВЕРХ
+  // развёрнутой сцены (шторка — сиблинг #app с z-index 61), поэтому первый «назад»
+  // закрывает шторку, второй сворачивает сцену и только третий уводит из раздела.
+  // Поменяй местами — и владелец уедет из фуллскрина в предыдущий вид, а сцена
+  // останется висеть поверх него, перекрывая и топбар, и док.
+  if (model.memoryFullscreen) {
+    memoryViews?.exitFullscreen?.();
+    return;
+  }
   const previous = model.history.pop();
   if (previous) navigate(previous, { push: false });
   else if (model.currentView !== "now") navigate("now", { push: false });
 }
 
 function updateBack() {
-  const visible = model.sheetOpen || model.history.length > 0 || model.currentView !== "now";
+  // Развёрнутая сцена закрывает собой и топбар, и док. Не будь её в этом списке,
+  // Telegram спрятал бы BackButton — и на «Сейчас» без истории выйти из фуллскрина
+  // было бы нечем, кроме кнопки «Свернуть».
+  const visible = model.sheetOpen || model.memoryFullscreen
+    || model.history.length > 0 || model.currentView !== "now";
   ui.back.hidden = !visible;
   telegram.setBack(visible);
 }
@@ -1921,11 +2340,14 @@ async function sendCommand(domain, action, payload = {}, { quiet = false, idempo
     throw error;
   }
   if (!quiet) toast(first(result.message, result.note, `${action}: принято`));
-  telegram.haptic("medium");
+  // Снимок, приехавший вместе с ответом, применяем всегда — он уже в руках и даром.
+  // Заказывать НОВЫЙ снимок после чтения — нет: платить за это нечем.
+  const readOnly = READ_ONLY_COMMANDS.has(`${String(domain)}.${String(action)}`);
+  if (!readOnly) telegram.haptic("medium");
   if (result.snapshot) {
     applySnapshot(result.snapshot);
     saveVerifiedSnapshot(result.snapshot).catch(() => {});
-  } else {
+  } else if (!readOnly) {
     scheduleRefresh(String(result.revision || ""));
   }
   return result;
@@ -2217,6 +2639,185 @@ async function submitFileUpload(form) {
     }
     submit.disabled = false;
   }
+}
+
+// ⚠ 03.08.2026. Её карты памяти открывались в общий приёмник серверных расписок:
+// весь markdown-исходник уезжал в <pre class="recap-copy"> — коробку с собственным
+// max-height: min(48vh, 520px) ВНУТРИ листа, который и сам скроллится. RUNS.md на
+// 35 КБ превращался в полтора десятка экранов вложенной прокрутки поверх сырых
+// решёток и квадратных скобок. Карта — оглавление её памяти, её читают глазами, а не
+// грепают, поэтому здесь свой разбор. showCommandResult не трогаем: для логов и
+// вывода shell сырой <pre> правилен, там ему и место.
+//
+// Экранирование здесь получается КОНСТРУКЦИЕЙ: всё, что пришло из файла, попадает в
+// документ только как textContent (через element) или createTextNode. innerHTML и
+// insertAdjacentHTML в этом блоке запрещены — не потому что сегодня есть дыра (её
+// нет: в app.js нет ни одного innerHTML), а потому что склейка строк — единственный
+// способ её завести. За этим следит test_app_memory.py.
+//
+// Синтаксис взят с её живых карт: H1, шапка-цитата, списки, [текст](путь), **жирный**,
+// _курсив_, голые https-ссылки. Заборы кода в картах сегодня не встречаются и сделаны
+// как дешёвая страховка на её будущее письмо; таблиц нет и разбора таблиц тоже нет —
+// это была бы поддержка выдуманного синтаксиса.
+const MD_INLINE = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(\[[^\]\n]*\]\([^)\n]*\))|(_[^_\n]+_)|(\*[^*\n]+\*)|(https?:\/\/[^\s<>"')\]]+)/g;
+const MD_HTTP = /^https?:\/\//i;
+const MD_WORD = /[\p{L}\p{N}_]/u;
+
+function mdLink(text, target) {
+  // ⚠ Цели внутри карт относительные: «../people/егор.md». Такой файл сегодня не
+  // отдаёт ни один маршрут /api/praxis/v1 и ни одна команда — открыть его аппу
+  // НЕЧЕМ. Поэтому это не ссылка, а имя с адресом рядом: живой <a> обещал бы
+  // переход, которого не будет. href появляется только у http(s) и только с
+  // rel="noopener noreferrer" — иначе нажатие внутри Telegram WebApp уводит
+  // владельца из аппа, отдав чужой вкладке window.opener.
+  if (MD_HTTP.test(target)) {
+    const link = element("a", "md-link md-link--web", text || target);
+    link.href = target;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    return link;
+  }
+  const span = element("span", "md-link");
+  span.append(element("span", "md-link__text", text || target));
+  if (target) span.append(element("small", "md-link__target", target));
+  return span;
+}
+
+function mdInline(source, parent) {
+  const text = String(source ?? "");
+  let last = 0;
+  MD_INLINE.lastIndex = 0;
+  let match;
+  while ((match = MD_INLINE.exec(text)) !== null) {
+    const token = match[0];
+    // Текст ДО находки отдаём всегда и первым делом: любая ветка ниже может решить,
+    // что находка — не разметка, и тогда пропуск этой строки съел бы кусок её карты.
+    if (match.index > last) parent.append(document.createTextNode(text.slice(last, match.index)));
+    const before = match.index > 0 ? text[match.index - 1] : "";
+    last = match.index + token.length;
+    if ((match[4] || match[5]) && MD_WORD.test(before)) {
+      // Курсив внутри слова — не курсив, а имя вроде snake_case_name. Соседний символ
+      // смотрим кодом, а не lookbehind'ом: его нет в старых WebKit, а апп живёт внутри
+      // Telegram на телефоне.
+      parent.append(document.createTextNode(token));
+    } else if (match[1]) parent.append(element("code", "md-code", token.slice(1, -1)));
+    else if (match[2]) parent.append(element("strong", "", token.slice(2, -2)));
+    else if (match[3]) {
+      const cut = token.indexOf("](");
+      parent.append(mdLink(token.slice(1, cut), token.slice(cut + 2, -1)));
+    } else if (match[4] || match[5]) parent.append(element("em", "", token.slice(1, -1)));
+    else parent.append(mdLink(token, token));
+  }
+  if (last < text.length) parent.append(document.createTextNode(text.slice(last)));
+  return parent;
+}
+
+function renderMarkdown(source) {
+  const fragment = document.createDocumentFragment();
+  const lines = String(source ?? "").replace(/\r\n?/g, "\n").split("\n");
+  let paragraph = [];
+  let quote = [];
+  let list = null;
+  let fence = null;
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    fragment.append(mdInline(paragraph.join(" "), element("p", "md-p")));
+    paragraph = [];
+  };
+  const flushQuote = () => {
+    if (!quote.length) return;
+    fragment.append(mdInline(quote.join(" "), element("blockquote", "md-quote")));
+    quote = [];
+  };
+  const flushList = () => {
+    if (!list) return;
+    fragment.append(list.node);
+    list = null;
+  };
+  const flushAll = () => { flushParagraph(); flushQuote(); flushList(); };
+  lines.forEach((raw) => {
+    const line = raw.replace(/\s+$/, "");
+    if (fence !== null) {
+      if (/^\s*```/.test(line)) {
+        fragment.append(element("pre", "md-pre", fence.join("\n")));
+        fence = null;
+      } else fence.push(raw);
+      return;
+    }
+    if (/^\s*```/.test(line)) { flushAll(); fence = []; return; }
+    if (!line.trim()) { flushAll(); return; }
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      flushAll();
+      // h1/h2 внутри листа сломали бы шкалу его собственного заголовка, поэтому вся
+      // лестница карты садится на h3/h4.
+      fragment.append(mdInline(heading[2], element(heading[1].length <= 2 ? "h3" : "h4", "md-h")));
+      return;
+    }
+    const quoted = /^\s*>\s?(.*)$/.exec(line);
+    if (quoted) { flushParagraph(); flushList(); quote.push(quoted[1]); return; }
+    flushQuote();
+    const bullet = /^(\s*)[-*+]\s+(.*)$/.exec(line);
+    const ordered = bullet ? null : /^(\s*)\d{1,3}[.)]\s+(.*)$/.exec(line);
+    const item = bullet || ordered;
+    if (item) {
+      flushParagraph();
+      const tag = bullet ? "ul" : "ol";
+      if (!list || list.tag !== tag) {
+        flushList();
+        list = { tag, node: element(tag, `md-list md-list--${tag}`) };
+      }
+      const node = element("li", "md-li");
+      if (item[1].length >= 2) node.classList.add("md-li--nested");
+      mdInline(item[2], node);
+      list.node.append(node);
+      return;
+    }
+    flushList();
+    paragraph.push(line.trim());
+  });
+  if (fence !== null) fragment.append(element("pre", "md-pre", fence.join("\n")));
+  flushAll();
+  return fragment;
+}
+
+async function openMemoryMap(name, trigger) {
+  const mapName = String(name || "").toUpperCase();
+  const container = element("div", "md-sheet");
+  container.append(loadingState("Читаю карту"));
+  // Лист открываем ДО ответа: чтение карты — это чтение, а не исполненная команда, и
+  // надзаголовок говорит именно это. Раньше здесь стояло «Server receipt» — чтение её
+  // памяти было подписано как совершённая над сервером операция.
+  openSheet({ title: mapName, eyebrow: "Карта памяти", content: container, returnFocus: trigger });
+  let result;
+  try {
+    result = await sendCommand("memory", "map.read", { map: mapName }, { quiet: true });
+  } catch (error) {
+    replace(container, errorState("Карта не открылась", boundedText(error.message, 300)));
+    return;
+  }
+  const known = asList(memoryOf(model.snapshot || {}).maps)
+    .find((entry) => String(first(entry.name, entry.id, "")).toUpperCase() === mapName) || {};
+  const facts = [
+    result.size !== undefined ? bytes(result.size) : "",
+    known.updated_at ? `обновлена ${relativeTime(known.updated_at)}` : "",
+    result.path ? String(result.path) : "",
+  ].filter(Boolean).join(" · ");
+  const parts = [];
+  if (facts) parts.push(element("p", "md-facts", facts));
+  // ⚠ Обрезка обязана говорить о себе вслух. Прежний приёмник читал только
+  // result.content и молчал про result.truncated, а сверху клал ещё и свой потолок в
+  // 128000 символов — НИЖЕ серверного, с многоточием, неотличимым от текста самой
+  // карты. Владелец мог прочесть урезанную карту и считать её целой. Своего потолка
+  // здесь нет намеренно: границу держит сервер, он же о ней и сообщает.
+  if (result.truncated) {
+    parts.push(element("p", "md-notice",
+      `Показано начало карты: она длиннее потолка чтения, целиком — ${bytes(result.size)}.`));
+  }
+  const doc = element("article", "md-doc");
+  doc.append(renderMarkdown(typeof result.content === "string" ? result.content : ""));
+  parts.push(doc);
+  replace(container, ...parts);
 }
 
 function showCommandResult(title, result, trigger) {
@@ -2737,9 +3338,7 @@ function setupEvents() {
     }
     const map = event.target.closest("[data-memory-map]");
     if (map) {
-      sendCommand("memory", "map.read", { map: map.dataset.memoryMap }, { quiet: true })
-        .then((result) => showCommandResult(map.dataset.memoryMap, result, map))
-        .catch(commandError);
+      openMemoryMap(map.dataset.memoryMap, map).catch(commandError);
       return;
     }
     const cancel = event.target.closest("[data-cancel-followup]");

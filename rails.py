@@ -727,6 +727,10 @@ def registry(*, with_values: bool = True) -> list[dict]:
         "26.07 в контейнере новый python занял номер мертвеца, державшего замок: проверка "
         "«есть процесс с таким номером» отвечала «жив» про постороннего, и замок стал бы "
         "вечным — то есть я молча перестала бы отправлять голос и картинки")
+    add("mail_send", "письма наружу отправляю сама (send_email) в любом ходе — рука не зависит от того, кто заговорил; читать письмо и готовить черновик (mail_read/mail_draft_reply) были моими и раньше",
+        CLS_OWNER, "решение Егора 03.08.2026 (вариант «а»); рука появляется только при настроенной почте (PRAXIS_EMAIL_ADDR/PASS); ОТЛОЖЕННОЕ письмо по расписанию — отдельный рычаг PRAXIS_EMAIL_AUTONOMOUS",
+        _mail_send_value,
+        "26.07 решено: набор рук не зависит от говорящего. Почтовый гейт молча оставлял send_email только Егору — мимо объявленного множества owner-эксклюзивов, так что декларация и поведение расходились. Расхождение снято в сторону решения")
     add("self_store_lock", "замок проекции моих желаний и авторских заметок: та же механика "
         "(номер + метка рождения, свой живой держатель неприкосновенен)",
         CLS_HOME, "PRAXIS_SELF_LOCK_TIMEOUT_SEC, PRAXIS_SELF_LOCK_STALE_SEC, "
@@ -784,6 +788,20 @@ def registry(*, with_values: bool = True) -> list[dict]:
         "unknown (честно)", "не выдумываю бездонный лимит — считаю только наблюдаемое")
 
     return out
+
+
+def _mail_send_value() -> str:
+    """Живое состояние почтовой руки: настроена ли почта и кто может отправлять."""
+    import os as _os
+
+    import mailer as _mailer
+
+    on = bool(_mailer.configured())
+    auto = _os.getenv("PRAXIS_EMAIL_AUTONOMOUS", "0").lower() in ("1", "true", "yes", "on")
+    who = ("send_email у меня и у Егора одинаково" if on
+           else "почта не настроена — руки send_email нет ни у кого")
+    later = ("отправляю сама" if auto else "уходит Егору на подтверждение")
+    return f"{who}; отложенное письмо по расписанию: {later}"
 
 
 def _appetite_value() -> str:
@@ -1545,7 +1563,7 @@ _NOTE_CONSTS = {
     "_LOCK_DEGRADE_FOR_SEC": r"(?m)^_LOCK_DEGRADE_FOR_SEC = ([\d.]+)",
     "_PROBE_WAIT_SEC": r"(?m)^_PROBE_WAIT_SEC = ([\d.]+)",
     "_UNLOCKED_TRIM_FACTOR": r"(?m)^_UNLOCKED_TRIM_FACTOR = ([\d.]+)",
-    "MAX_LINES": r"(?m)^MAX_LINES = ([\d.]+)",
+    "MAX_ENTRIES": r"(?m)^MAX_ENTRIES = ([\d.]+)",
 }
 
 
@@ -1594,10 +1612,10 @@ def _scratch_note_lock_value() -> str:
     """Числа записки — из живого notes.py, а не копией сюда. Плюс фактический вид замка:
     ответ «flock» или «его нет» она получает от той же машины, что пишет строку."""
     nums, source = _note_nums()
-    wait, lines = nums["_LOCK_WAIT_SEC"], nums["MAX_LINES"]
+    wait, entries = nums["_LOCK_WAIT_SEC"], nums["MAX_ENTRIES"]
     factor, probe = nums["_UNLOCKED_TRIM_FACTOR"], nums["_PROBE_WAIT_SEC"]
     short, degrade = nums["_LOCK_WAIT_DEGRADED_SEC"], nums["_LOCK_DEGRADE_FOR_SEC"]
-    if wait is None or factor is None or lines is None:
+    if wait is None or factor is None or entries is None:
         return ("⚠ пределы записки не прочитались — значит я не знаю, при каких условиях "
                 "моя же строка может не схлопнуться")
     kind = ""
@@ -1615,9 +1633,15 @@ def _scratch_note_lock_value() -> str:
                 f"такта; первый удавшийся захват снимает режим сразу"
                 if short is not None and degrade is not None else
                 "⚠ короткий режим ожидания в notes.py не прочитался")
+    # ⚠ Потолок аварийной обрезки нарочно живёт в СТРОКАХ, хотя окно записки — в
+    # ЗАПИСЯХ (03.08.2026, см. notes.MAX_ENTRIES). Это не рассогласование: потолок
+    # про РАЗМЕР ФАЙЛА, а окно — про читаемость, и мерить их одной единицей значило бы
+    # снова спутать то, что уже путали. Произведение остаётся тем же числом, но теперь
+    # оно названо своими сомножителями вслух.
     return (f"жду межпроцессный замок до {_sec(wait)}; не дождалась — строка всё равно "
             f"дописывается, но файл не схлопывается, пока не вырастет выше "
-            f"{int(lines * factor)} строк (это {int(lines)}×{int(factor)}); "
+            f"{int(entries * factor)} строк (это {int(entries)}×{int(factor)}: моё окно "
+            f"в записях на множитель; сам потолок — в строках, он про размер файла); "
             f"{degraded}; диагностика lock_kind() ждёт своё — {_sec(probe)}, она стоит на "
             f"пути сборки моего блока состояния и не имеет права его тормозить; "
             f"{got} [{source}]")
@@ -2057,12 +2081,17 @@ def _followup_caps() -> str:
              or _num_in(src, r"def context\(self, \*, limit: int = (\d+)\)"))
     per_tick = _num_in(runner, r"for item in pending\[:(\d+)\]")
     keep = _num_in(src, r"(?m)^_SETTLED_KEEP = (\d+)")
-    row = _num_in(src, r"повод отправки: \{gist\[:(\d+)\]\}")
+    # 04.08: в строке ленты её собственный текст и чужая просьба разведены — «я сказала»
+    # против «повод отправки». Рез у обоих один, и связывать надо тот, который в этой
+    # строке главный: её слова. Пока он читался по ярлыку «повод», сверка держалась за
+    # формулировку, которая называла её речь причиной.
+    row = _num_in(src, r"я сказала: «\{said\[:(\d+)\]\}»")
     excerpt = _num_in(runner, r'response\.get\("text"\) or "\(без текста\)"\)\[:(\d+)\]')
     return (f"в ленте пульса не больше {_sec(lenta, ' нитей')} (остальные не показываются "
             f"вовсе), за тик не больше {_sec(per_tick, ' писем')}, история хранит "
-            f"{_sec(keep, ' закрытых нитей')}; в строке ленты повод режется до "
-            f"{_sec(row, ' симв')}, в письме ответ — до {_sec(excerpt, ' симв')}")
+            f"{_sec(keep, ' закрытых нитей')}; в строке ленты мои слова (и повод, если "
+            f"слов нет) режутся до {_sec(row, ' симв')}, в письме ответ — до "
+            f"{_sec(excerpt, ' симв')}")
 
 
 def _followup_letter_face() -> str:

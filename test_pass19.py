@@ -404,7 +404,26 @@ class TestFormation(Pass19Base):
 
 
 class TestHybridRecallAndPanel(Pass19Base):
-    def test_semantic_rerank_finds_no_keyword_overlap_and_shows_provenance(self):
+    def test_semantic_rerank_only_reorders_lexical_hits_and_shows_provenance(self):
+        """Договор recall после её решения от 03.08.2026 — и чем за него заплачено.
+
+        Раньше здесь проверялось, что запрос БЕЗ единого общего слова («кто ходит в
+        горы» против «занимается альпинизмом») всё равно находит запись. Это умело
+        ровно одно место — broad seed, подмешивавший в кандидаты фон, не зависящий
+        от запроса.
+
+        Praxis завершила его экспериментом и убрала. Её числа: на 12 естественных
+        recall seed дал 240 кандидатов и НОЛЬ попаданий в выдачу (680/0 всего) — то
+        есть платил задержкой и деньгами, ничего не меняя. Её формулировка:
+        «семантический rerank остаётся — он ранжирует уже найденных lexical
+        кандидатов, не подмешивая фон».
+
+        ⚠ Цена названа вслух, а не спрятана: находка по смыслу БЕЗ совпадения слов
+        больше невозможна, и на проде тоже (режим hybrid-hosted-rerank, векторного
+        пути нет). Синтетический случай ниже — ровно тот, который разменяли.
+        Вернуть способность — отдельная работа (настоящие эмбеддинги либо узкий,
+        не-фоновый источник кандидатов), а не правка этого файла.
+        """
         # A compact is canonical Markdown and cites its primary event.
         event = life.record_message("7", "Егор: занимаюсь альпинизмом", actor="Егор", direction="in")
         meta = life._write_compact(
@@ -413,7 +432,14 @@ class TestHybridRecallAndPanel(Pass19Base):
             continued=False)
         self._orig.append((mi, "_semantic_rerank", mi._semantic_rerank))
         mi._semantic_rerank = lambda q, cs: [1.0 if "альпинизм" in c["text"] else 0.0 for c in cs]
-        hits = mi.search("кто ходит в горы", k=3, scope="owner", semantic=True)
+        # Цена договора: фона в кандидатах больше нет.
+        no_overlap = mi.search("кто ходит в горы", k=3, scope="owner", semantic=True)
+        self.assertFalse([h for h in no_overlap if "альпинизм" in h["text"]],
+                         "фон вернулся в кандидаты — это смена договора, а не теста")
+
+        # А то, ради чего rerank и живёт: на запросе СО совпадением он задаёт
+        # порядок, и происхождение записи видно.
+        hits = mi.search("альпинизмом", k=3, scope="owner", semantic=True)
         hit = next(h for h in hits if "альпинизм" in h["text"])
         self.assertGreater(hit["signals"]["semantic"], 0.9)
         self.assertIn(event["id"], hit["provenance"])

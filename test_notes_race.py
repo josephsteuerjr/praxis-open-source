@@ -56,7 +56,7 @@ class _Base(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="praxis_notes_race_"))
         self.scratch = self.tmp / "memory" / ".scratch"
         self.scratch.mkdir(parents=True, exist_ok=True)
-        self._orig = [(k, getattr(notes, k)) for k in ("BASE", "SCRATCH_DIR", "MAX_LINES")]
+        self._orig = [(k, getattr(notes, k)) for k in ("BASE", "SCRATCH_DIR", "MAX_ENTRIES")]
         notes.BASE = self.tmp
         notes.SCRATCH_DIR = self.scratch
         # Переключения потоков по умолчанию раз в 5 мс — окно read-modify-write в
@@ -139,7 +139,7 @@ class TestNoLineIsEverLost(_Base):
         Это и есть тот дефект: append() читал файл целиком, дописывал свою строку и
         писал целиком обратно. Двое читают одну версию — второй затирает первого.
         """
-        notes.MAX_LINES = self.WRITERS * self.PER_WRITER + 10   # роллинг не должен мешать
+        notes.MAX_ENTRIES = self.WRITERS * self.PER_WRITER + 10   # роллинг не должен мешать
         self._hammer(self.WRITERS, self.PER_WRITER)
         expected = {f"w{w}-{i}" for w in range(self.WRITERS) for i in range(self.PER_WRITER)}
         bodies = self._bodies()
@@ -149,16 +149,16 @@ class TestNoLineIsEverLost(_Base):
         self.assertEqual(len(bodies), len(set(bodies)), "строка задвоилась")
 
     def test_rolling_window_never_eats_a_concurrent_line(self):
-        """Схлопывание до MAX_LINES само по себе — read-modify-write, и оно тоже теряло.
+        """Схлопывание до MAX_ENTRIES само по себе — read-modify-write, и оно тоже теряло.
 
         Все писатели синхронно пишут свою ПОСЛЕДНЮЮ строку, когда остальные уже
-        закончили. Этих строк ровно WRITERS, окно — MAX_LINES > WRITERS, значит выжить
+        закончили. Этих строк ровно WRITERS, окно — MAX_ENTRIES > WRITERS, значит выжить
         обязаны все до одной. Пропала хоть одна — обрезка съела чужую запись.
         """
-        self.assertGreater(notes.MAX_LINES, self.WRITERS, "окно меньше числа писателей")
+        self.assertGreater(notes.MAX_ENTRIES, self.WRITERS, "окно меньше числа писателей")
         finals = self._hammer(self.WRITERS, self.PER_WRITER, final_barrier=True)
         bodies = self._bodies()
-        self.assertEqual(len(bodies), notes.MAX_LINES,
+        self.assertEqual(len(bodies), notes.MAX_ENTRIES,
                          f"роллинг не удержал окно: {len(bodies)} строк")
         missing = [f for f in finals if f not in bodies]
         self.assertEqual(missing, [], f"обрезка съела свежие строки: {missing}; в файле {bodies}")
@@ -180,10 +180,10 @@ class TestNoLineIsEverLost(_Base):
         """
         self.assertIn(notes.lock_kind(), ("flock", "msvcrt"))
         self._patch("_writer_lock", lambda p: contextlib.nullcontext())
-        self.assertGreater(notes.MAX_LINES, self.WRITERS, "окно меньше числа писателей")
+        self.assertGreater(notes.MAX_ENTRIES, self.WRITERS, "окно меньше числа писателей")
         finals = self._hammer(self.WRITERS, 20, final_barrier=True)
         bodies = self._bodies()
-        self.assertEqual(len(bodies), notes.MAX_LINES,
+        self.assertEqual(len(bodies), notes.MAX_ENTRIES,
                          f"файл не схлопнут ({len(bodies)} строк) — межпроцессный замок "
                          f"не брался, схлопывание отменялось каждый раз")
         missing = [f for f in finals if f not in bodies]
@@ -199,7 +199,7 @@ class TestNoLineIsEverLost(_Base):
         сказав об этом в лог.
         """
         self._patch("_acquire", lambda fd, wait: (False, "none: тест снял замок нарочно"))
-        notes.MAX_LINES = 500                      # потолок аварийной обрезки далеко
+        notes.MAX_ENTRIES = 500                      # потолок аварийной обрезки далеко
         with self.assertLogs("praxis.notes", level="WARNING") as caught:
             self._hammer(self.WRITERS, 20)
         self.assertTrue(any("замок не взят" in m for m in caught.output),
@@ -214,7 +214,7 @@ class TestNoLineIsEverLost(_Base):
         for i in range(12):
             notes.append(CHAT, f"строка {i}")
         out = notes.read(CHAT)
-        self.assertEqual(len(out.splitlines()), notes.MAX_LINES)
+        self.assertEqual(len(out.splitlines()), notes.MAX_ENTRIES)
         self.assertIn("строка 11", out)
         self.assertNotIn("строка 0", out)
         notes.append(CHAT, "сказала (голос): «кэш греет вход»")
@@ -237,10 +237,10 @@ class TestTwoProcessesLoseNoLine(_Base):
 
     def test_two_processes_lose_no_line(self):
         cap = self.PROCS * self.PER_PROC + 10
-        notes.MAX_LINES = cap
+        notes.MAX_ENTRIES = cap
         child = (
             "import sys, notes\n"
-            f"notes.MAX_LINES = {cap}\n"
+            f"notes.MAX_ENTRIES = {cap}\n"
             "chat, tag, count = sys.argv[1], sys.argv[2], int(sys.argv[3])\n"
             "for i in range(count):\n"
             "    notes.append(chat, '%s-%d' % (tag, i))\n"
@@ -284,7 +284,7 @@ class TestThirdLayerAlone(_Base):
         """Ни потокового замка, ни межпроцессного — и ни одной потерянной строки."""
         self._patch("_writer_lock", lambda p: contextlib.nullcontext())
         self._patch("_acquire", self.NOLOCK)
-        notes.MAX_LINES = 10_000                   # потолок аварийной обрезки далеко
+        notes.MAX_ENTRIES = 10_000                   # потолок аварийной обрезки далеко
         self._hammer(6, 20)
         expected = {f"w{w}-{i}" for w in range(6) for i in range(20)}
         bodies = self._bodies()
@@ -301,11 +301,11 @@ class TestThirdLayerAlone(_Base):
         двоих независимых писателей (контейнеры praxis и praxis-mailbot делят `./:/app`).
         """
         per_proc, procs = 120, 2
-        notes.MAX_LINES = 10_000
+        notes.MAX_ENTRIES = 10_000
         child = (
             "import sys, notes\n"
             "notes._acquire = lambda fd, wait: (False, 'none: тест снял замок нарочно')\n"
-            "notes.MAX_LINES = 10000\n"
+            "notes.MAX_ENTRIES = 10000\n"
             "chat, tag, count = sys.argv[1], sys.argv[2], int(sys.argv[3])\n"
             "for i in range(count):\n"
             "    notes.append(chat, '%s-%d' % (tag, i))\n"
@@ -350,12 +350,12 @@ class TestThirdLayerAlone(_Base):
         27.07). Это не дыра, а нарочно: `rails.py:1164-1171` берёт то же число ЖИВЬЁМ из
         `notes.py`, а не держит копию, — значит разойтись манифесту и коду негде и ловить
         нечего. Пин литерала был бы забором вокруг настроечной ручки без единой защищаемой
-        стороны. Проверяется здесь ФОРМУЛА («схлопывает ровно на `MAX_LINES × фактор`,
+        стороны. Проверяется здесь ФОРМУЛА («схлопывает ровно на `MAX_ENTRIES × фактор`,
         а не раньше и не позже») и то, что обрезка не проходит молча.
         """
         self._patch("_acquire", self.NOLOCK)
-        notes.MAX_LINES = 3
-        ceiling = notes.MAX_LINES * notes._UNLOCKED_TRIM_FACTOR
+        notes.MAX_ENTRIES = 3
+        ceiling = notes.MAX_ENTRIES * notes._UNLOCKED_TRIM_FACTOR
         for i in range(ceiling - 1):
             notes.append(CHAT, f"строка {i}")
         self.assertEqual(len(self._lines()), ceiling - 1,
@@ -365,7 +365,7 @@ class TestThirdLayerAlone(_Base):
         self.assertTrue(any("схлопываю" in m for m in caught.output),
                         "аварийная обрезка прошла молча — это молчаливое ограничение")
         lines = self._lines()
-        self.assertEqual(len(lines), notes.MAX_LINES, f"потолок не сработал: {len(lines)}")
+        self.assertEqual(len(lines), notes.MAX_ENTRIES, f"потолок не сработал: {len(lines)}")
         self.assertIn("строка ровно на потолке", lines[-1])
 
     def test_emergency_ceiling_stays_above_the_normal_window(self):
@@ -390,10 +390,10 @@ class TestThirdLayerAlone(_Base):
         никогда: `_write_lines` всегда отвечает «файл изменился», и append обязан (а) не
         потерять строку и (б) сказать вслух, что не схлопнул.
         """
-        notes.MAX_LINES = 50                       # сеем при широком окне, чтобы не схлопнуть
+        notes.MAX_ENTRIES = 50                       # сеем при широком окне, чтобы не схлопнуть
         for i in range(5):
             notes.append(CHAT, f"старое-{i}")
-        notes.MAX_LINES = 2                        # теперь окно узкое — схлопнуть ХОЧЕТСЯ,
+        notes.MAX_ENTRIES = 2                        # теперь окно узкое — схлопнуть ХОЧЕТСЯ,
         self._patch("_write_lines", lambda p, lines, expect=None: False)   # но снимок не сойдётся
         with self.assertLogs("praxis.notes", level="WARNING") as caught:
             notes.append(CHAT, "строка при несходящемся снимке")
@@ -421,7 +421,7 @@ class TestMixedWritersAndBrokenExclusion(_Base):
         в это окно: подменённый `_read_lines` кладёт его строку сразу после того, как
         держатель прочитал файл.
         """
-        notes.MAX_LINES = 2
+        notes.MAX_ENTRIES = 2
         self._seed(3)
         victim = "13:34 · ПОТЕРПЕВШИЙ"
         real_read = notes._read_lines
@@ -460,7 +460,7 @@ class TestMixedWritersAndBrokenExclusion(_Base):
         замок на новом файле. Схлопывать в этот момент — ровно способ съесть чужую строку;
         append этого не делает и говорит об этом вслух.
         """
-        notes.MAX_LINES = 2
+        notes.MAX_ENTRIES = 2
         self._seed(3)
         real_raw = notes._append_raw
 
@@ -566,7 +566,7 @@ class TestWaitIsNotPaidPerNoteForever(_Base):
 
     def test_short_wait_costs_only_the_collapse_never_the_line(self):
         """Что именно теряется в коротком режиме — схлопывание, и ничего кроме."""
-        notes.MAX_LINES = 2
+        notes.MAX_ENTRIES = 2
         notes._DEGRADED_UNTIL = 0.0
         self._patch("_acquire", lambda fd, wait: (False, f"busy: ждала {wait:g}с"))
         for i in range(5):

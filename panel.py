@@ -1784,7 +1784,13 @@ def appetite_intent(kind: str, text: str = "") -> dict:
         return {"ok": False, "error": f"kind не из {appetite.REQUEST_KINDS}"}
     if kind == "text" and not (text or "").strip():
         return {"ok": False, "error": "пустая просьба"}
-    req = appetite.set_owner_request(kind, text, source="panel")
+    try:
+        req = appetite.set_owner_request(kind, text, source="panel")
+    except appetite.OwnerWordDestroyed as exc:
+        # Текст доехал без единой буквы (ascii-замена по дороге). В её договор такое не
+        # пишем вовсе — пусть лучше кнопка честно скажет «не дошло», чем она полтора
+        # месяца живёт толкованием фразы, которой не видит (инцидент 29.07).
+        return {"ok": False, "error": str(exc)}
     _journal_panel(f"просьба об аппетитах: {kind}" + (f" «{(text or '')[:80]}»" if (text or "").strip() else ""))
     return {"ok": True, "request": req}
 

@@ -229,15 +229,31 @@ class TestAgentMailTools(Base):
         self.assertNotIn(h, evidence)
         self.assertNotIn("Почтовый ящик", evidence)
 
-    def test_index_not_in_group_context(self):
-        self._one()
-        _, dyn = agent.build_system_parts(owner=False, is_dm=False, scope="group")
-        self.assertNotIn("Почтовый ящик", dyn, "ящик owner-only — в группу не течёт")
+    def test_index_is_visible_in_every_room_and_never_as_authority(self):
+        """⚠ Здесь стоял приватностный сторож, который НИКОГДА не работал.
 
-    def test_index_not_in_known_dm(self):
-        self._one()
-        _, dyn = agent.build_system_parts(owner=False, is_dm=True, scope="known")
-        self.assertNotIn("Почтовый ящик", dyn, "ящик owner-only — даже знакомому в личке не течёт")
+        Две прежние проверки заявляли «ящик owner-only, в группу не течёт», но
+        смотрели в `build_system_parts()` — а он отдаёт только (persona, dynamic) и
+        ВЫБРАСЫВАЕТ третье значение, evidence, куда единственно и попадает тир ящика.
+        То есть `assertNotIn("Почтовый ящик", dyn)` не мог упасть ни при каком scope,
+        ни при каком owner и ни при каком содержимом ящика.
+
+        03.08.2026 решением Егора («доступ к почте полный, и не только со мной»)
+        условие `owner_audience` с индекса ящика снято: темы и отправители теперь
+        лежат в её кадре в любой комнате, включая публичные. Суита пережила снятие
+        приватностного свойства без единой красноты — сторож был бутафорским ЕЩЁ ДО
+        того, как свойство убрали.
+
+        Тест проверяет действующий договор в ПРАВИЛЬНОМ значении. Вернут условие —
+        покраснеет здесь, и это прочтётся как смена договора, а не как поломка.
+        """
+        h = self._one()
+        for room in ({"owner": False, "is_dm": False, "scope": "group"},
+                     {"owner": False, "is_dm": True, "scope": "known"}):
+            _, system, evidence = agent._build_prompt_parts(**room)
+            self.assertNotIn(h, system, f"ящик не получает SYSTEM-authority: {room}")
+            self.assertIn("Почтовый ящик", evidence,
+                          f"договор от 03.08: ящик виден в любой комнате — {room}")
 
     def test_frame_block_present_when_open(self):
         h = self._one()

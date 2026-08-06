@@ -57,7 +57,15 @@ def _slug(ref: str) -> str:
 def resolve(ref: str) -> str:
     """Узел по ссылке: слаг как есть, а если такого файла нет — поиск по заголовкам
     И АЛИАСАМ людей (PASS 8.6: «Егор» найдёт yegor-kosyrev.md по строке `Алиасы:`).
-    Иначе — просто слаг (узел-тема)."""
+    Иначе — просто слаг (узел-тема).
+
+    01.08.2026: последним шагом — сравнение по ключу имени (`people.identity_key`),
+    который складывает написания ОДНОГО имени: кириллицу с латиницей, диакритику и
+    хвост-хэндл подписи. До этого «Егор», «Yegor Kosyrev» и «Yegor Kosyrev (@handle)»
+    были для резолва тремя разными людьми — и заводили три досье. Шаг стоит ПОСЛЕ
+    точных совпадений и срабатывает только при ЕДИНСТВЕННОМ кандидате; похожие, но
+    разные написания (Kosyrev/Kosyrew) он по-прежнему не сближает.
+    """
     s = _slug(ref)
     if not s or people.path_for(s).exists():
         return s
@@ -72,7 +80,7 @@ def resolve(ref: str) -> str:
             for a in people.aliases(p.stem):
                 if a.strip().lower() == want or _slug(a) == s:
                     return p.stem
-    return s
+    return people.slug_by_identity(ref) or s
 
 
 def display(slug: str) -> str:

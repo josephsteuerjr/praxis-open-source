@@ -230,6 +230,7 @@ class FollowUpLedger:
         notify_owner: bool = False,
         notice_source: str = "",
         sent_excerpt: str = "",
+        purpose: str = "",
     ) -> dict:
         now = float(sent_at if sent_at is not None else time.time())
         receipt = str(idempotency_key or "").strip()
@@ -251,6 +252,12 @@ class FollowUpLedger:
             # поправку второй раз реплаем на собственное #94144: id своей реплики
             # она взяла отсюда, а текста её не было нигде — в леджере не было поля.
             "sent_excerpt": str(sent_excerpt or "")[:500],
+            # ЧЕМ она это сказала: "tool:send_message", "tool:narrate", … Нужно тем, кто
+            # читает след как ответ на вопрос «кому я сегодня писала»: строка процесса,
+            # брошенная наррацией в тот же тред, — тоже её слова, но это не письмо
+            # человеку, и вытеснять им настоящее сообщение из обзора нельзя.
+            # Пустая строка = запись старше 04.08 либо писатель, который не сказал.
+            "purpose": str(purpose or "")[:64],
             # Отчёт Егору — не свойство механизма, а решение заказчика.
             "notify_owner": bool(notify_owner),
             "notice_source": str(notice_source or "")[:40],
@@ -462,17 +469,27 @@ class FollowUpLedger:
                 _save(state, self.path)
             return changed
 
-    def context(self, *, limit: int = CONTEXT_LIMIT) -> str:
-        """Compact factual context for Praxis's hourly social pulse."""
+    def context(self, *, limit: int = CONTEXT_LIMIT, offset: int = 0) -> str:
+        """Compact factual context for Praxis's hourly social pulse.
+
+        ⚠ 01.08: лента отдавала САМЫЕ СТАРЫЕ незакрытые нити (`unresolved[:cap]`), а
+        закрытые добивали остаток. При 18 pending и потолке 12 свежее просто не влезало:
+        в 05:29 она дважды спросила «что у меня в нитях», оба раза получила одни и те же
+        12 чужих ниток возрастом 62-66 часов — и, не найдя себя рядом с Егором, поздоровалась
+        с ним второй раз за утро. Лента пульса отвечает на вопрос «что я только что делала»,
+        поэтому по умолчанию она показывает СВЕЖЕЕ. Старые обязательства при этом не
+        пропадают: они гаснут сами через TRACE_TTL_SEC и достижимы явным offset — который
+        до сегодня молча игнорировался, и пролистывание возвращало ту же страницу.
+        """
         all_items = self.list()
         cap = max(1, int(limit))
+        skip = max(0, int(offset))
         unresolved = [
             item for item in all_items
             if item.get("status") == "pending" or _owes_owner_notice(item)
         ]
-        # Old obligations must not disappear behind a stream of settled history.
-        # Fill any remaining budget with the newest settled facts.
-        items = unresolved[:cap]
+        fresh_first = list(reversed(unresolved))
+        items = list(reversed(fresh_first[skip:skip + cap]))
         if len(items) < cap:
             unresolved_ids = {str(item.get("id") or "") for item in unresolved}
             settled = [
@@ -499,12 +516,17 @@ class FollowUpLedger:
             # у owner-веток содержит слова Егора («им отправить»), и анти-повтор на
             # них не работает вовсе. `sent_text` читаем тоже: соседняя бригада вводит
             # то же поле под своим именем — пусть смена имени не гасит след молча.
-            gist = str(
-                item.get("sent_excerpt") or item.get("sent_text")
-                or item.get("request_text") or ""
-            ).strip()
-            if gist:
-                row += f"; повод отправки: {gist[:240]}"
+            # ⚠ 04.08. Здесь ЕЁ СОБСТВЕННЫЙ отправленный текст подписывался как «повод
+            # отправки» — то есть единственное место кадра, где лежит ответ на вопрос
+            # «что я уже сказала этому человеку», было озаглавлено как причина, а не как
+            # речь. Данные доезжали, позиция терялась. Разводим два разных факта:
+            # sent_excerpt/sent_text — это её слова, request_text — чужая просьба.
+            said = str(item.get("sent_excerpt") or item.get("sent_text") or "").strip()
+            asked = str(item.get("request_text") or "").strip()
+            if said:
+                row += f"; я сказала: «{said[:240]}»"
+            elif asked:
+                row += f"; повод отправки: {asked[:240]}"
             # Правило 2 в строке, которую она читает: кто заказал отчёт и уйдёт ли он.
             if item.get("notify_owner"):
                 source = str(item.get("notice_source") or "").strip()

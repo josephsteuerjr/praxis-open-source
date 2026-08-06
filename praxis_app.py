@@ -8,6 +8,7 @@ used by Telegram, Forge and the Windows body.
 
 from __future__ import annotations
 
+import codecs
 import datetime as dt
 import hashlib
 import json
@@ -308,6 +309,30 @@ def _sha_file(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+MAP_READ_LIMIT = 128 * 1024
+
+
+def _bounded_map_text(raw: bytes, limit: int = MAP_READ_LIMIT) -> tuple[str, bool]:
+    """Отдать не больше `limit` БАЙТ карты, оборвав чтение по границе символа.
+
+    ⚠ 03.08.2026. Здесь стоял срез по байтам ДО декодирования: raw[:limit].decode(
+    "utf-8", "replace"). У её карт кириллица, два байта на букву, поэтому край почти
+    всегда приходился на середину последовательности, и errors="replace" дописывал
+    U+FFFD. Цена тихая и обидная: обрыв выглядел не как обрыв, а как испорченное
+    слово — владелец видел мусор и имел все основания думать, что мусор лежит в
+    самой её памяти.
+
+    Инкрементальный декодер с final=False держит незавершённую последовательность в
+    своём буфере и не выдаёт её вовсе: «хвостовой» символ просто не попадает в вывод,
+    и ручной арифметики с границами байтов здесь не нужно. Потолок остаётся байтовым
+    намеренно — в тех же байтах меряется size, который апп показывает владельцу.
+    """
+    if len(raw) <= limit:
+        return raw.decode("utf-8", "replace"), False
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    return decoder.decode(raw[:limit], final=False), True
 
 
 def _mtime(path: Path) -> str:
@@ -795,6 +820,19 @@ class PraxisAppService:
             "sent_message_id": row.get("sent_message_id"),
             "answered_at": response.get("received_at"),
             "answer_preview": str(response.get("text") or "")[:280],
+            # ⚠ 03.08.2026. Ниже, в _telegram(), «заказанные отчёты» отбираются по
+            # row["notify_owner"] — но перебирается там список КАРТОЧЕК, а карточка
+            # этого поля не несла. Условие было ложным для каждой строки без
+            # исключения: pending_followups и now.pending_followups отдавали 0 при
+            # 81 живой нити. Это не «ничего не ждём», это «нечем проверить», а ноль
+            # читается как спокойствие — та же ловушка, что со снятыми фазами сна.
+            # Правило отбора не меняется (в счёт идёт только заказанное Егором);
+            # меняется лишь то, что признак теперь доезжает до места счёта.
+            "notify_owner": bool(row.get("notify_owner")),
+            # Тем же рейсом — отметка об уже доставленном отчёте: клиент фильтровал
+            # по !notified_at, и его условие было тождественно истинным по той же
+            # причине. Оба поля дешёвые и не раскрывают её текста.
+            "notified_at": row.get("notified_at"),
         }
 
     def _telegram(self) -> dict:
@@ -1963,13 +2001,14 @@ class PraxisAppService:
                     raise ValueError("unknown memory map")
                 path = self.base / "memory" / "maps" / f"{name}.md"
                 raw = path.read_bytes()
-                limit = 128 * 1024
-                content = raw[:limit].decode("utf-8", "replace")
+                # Состав ответа тот же: content/text/size/sha256/truncated, те же
+                # ключи в тех же единицах. Меняется только то, ГДЕ проходит разрез.
+                content, truncated = _bounded_map_text(raw)
                 return {
                     "ok": True, "map": name, "path": f"memory/maps/{name}.md",
                     "content": content, "text": content,
                     "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
-                    "truncated": len(raw) > limit,
+                    "truncated": truncated,
                 }
             if action == "rebuild":
                 if not viewer.may("praxis.work"):

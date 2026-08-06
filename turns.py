@@ -664,6 +664,16 @@ def _visible(t: dict, scope: str, chat_id) -> bool:
     """
     if scope == "owner":
         return True
+    return same_place(t, chat_id)
+
+
+def same_place(t: dict, chat_id) -> bool:
+    """Принадлежит ли ход ЭТОМУ месту — с учётом веток одной комнаты.
+
+    Вынесено из `_visible` 03.08.2026, потому что там это условие отвечало на другой
+    вопрос. См. `in_room` ниже: тир приватности и фильтр места — разные вещи, и одно
+    имя `chat_id` на оба стоило нам подписи «Место: X» над чужой лентой.
+    """
     cid = t.get("chat_id")
     if cid is None or chat_id is None:
         return False
@@ -681,6 +691,37 @@ def recent(n: int = 6, scope: str = "owner", chat_id=None) -> list[dict]:
     with _LOCK:
         rows = [t for t in _load_ring() if _visible(t, scope, chat_id)]
     return rows[-max(0, n):]
+
+
+def in_room(n: int = 6, chat_id=None) -> list[dict]:
+    """Ходы ИМЕННО в этом месте, старые → новые.
+
+    ⚠ Не путать с `recent(chat_id=…)`. Там `chat_id` — ТИР ПРИВАТНОСТИ, ответ на вопрос
+    «что мне позволено видеть»: при `scope="owner"` он игнорируется вовсе, потому что
+    владельцу видно всё. Здесь `chat_id` — ФИЛЬТР МЕСТА, ответ на вопрос «что было вот
+    здесь». Одно имя на два разных понятия уже дало нам подпись «Место: X» над лентой,
+    в которой лежали ходы из других мест и её собственные окна (03.08.2026, поймано
+    живой пробой, а не тестом).
+
+    Гейт раскрытия здесь НЕ живёт: он стоит выше, у вызывающего
+    (`agent._may_name_other_rooms`). Эта функция только фильтрует.
+    """
+    with _LOCK:
+        rows = [t for t in _load_ring() if same_place(t, chat_id)]
+    return rows[-max(0, n):]
+
+
+def describe_room(n: int = 6, chat_id=None) -> str:
+    """Текст про КОНКРЕТНОЕ место для её руки `recent_turns(room=…)`."""
+    try:
+        n = max(1, min(int(n or 6), 20))
+    except (TypeError, ValueError):
+        n = 6
+    rows = in_room(n=n, chat_id=chat_id)
+    if not rows:
+        return "Ни одного записанного хода в этом месте."
+    return ("Мои прожитые ходы здесь (лог кодом, не по памяти; новые снизу):" + chr(10)
+            + chr(10).join("- " + format_line(t) for t in rows))
 
 
 _SEND_MARKERS = ("send_message(", "narrate(", "send_file(", "Отправила")

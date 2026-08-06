@@ -17,7 +17,6 @@ Telegram-контур, durable runs, задачи Forge, workers и обучен
 | `praxis-serverd` | выполнение `praxis.host.v2`, operation receipts, recovery и hash-chain audit | LLM, prompt loop, память, задачи Forge |
 | Windows Body | `praxis.body.v1`, локальные файлы/процессы/desktop, journal и artifact cache | LLM, память, policy, task store |
 | `praxis-bridge` | routing, unacked frame spool и content-addressed artifacts | решение, что и зачем выполнять |
-| Praxis App/PWA | scoped server projection, локальный shell cache, verified snapshot и черновики | LLM, каноническая память, scheduler, offline authority |
 
 `interactive` и `system` на Windows — два execution context одного body protocol. Они не создают две
 Praxis. LocalSystem service владеет единственным исходящим WSS; пользовательский session host
@@ -127,16 +126,6 @@ Transport-owned доставка завершается транспортом �
 уникального evidence и 60 секунд. Это защита реконструкции от неограниченного чтения повреждённого
 или гигантского WAL, а не потолок tools, действий или продолжительности живого run.
 
-Praxis App привязывает каждую command/server-effect mutation и каждый Windows side effect к паре
-`principal + client idempotency key` и нормализованному намерению. Тот же ключ с другим намерением
-отклоняется. Повтор того же command intent возвращается к одному durable run/claim/receipt; body
-retry повторно использует ровно те же `request_id` и `operation_id`. Read-only body вызовы могут
-получить новые ids, но body-мутация без ключа не стартует. Два owner-authority endpoint являются
-явными исключениями: access grant/revoke приводит effective state к тому же результату, однако retry
-после потерянного HTTP-ответа может оставить дополнительный audit event; enrollment secret не
-сохраняется и поэтому не replayable — потерянный ответ оставляет истекающую orphan-ссылку, а owner
-может выпустить новую.
-
 Прямые `send_message`/адресный `send_file` и scheduled `message`/`note` используют
 `telegram_outbox.py`:
 immutable intent, приватно staged file, стабильный MTProto `random_id`, retry ledger и terminal
@@ -148,9 +137,10 @@ collision-proof spool filename, поэтому внутренний префик
 Run не становится terminal при незакрытом tool call. Терминальный `RECAP.md` пишется и продвигается
 идемпотентно; polling, retries и transport receipts не превращаются в отдельные «мысли».
 
-## Owner delivery и Praxis App
+## Owner delivery и headless mailbot
 
-`owner_delivery.py` — приватный append-only ledger внимания владельца, общий для Telegram и PWA.
+`owner_delivery.py` — приватный append-only ledger внимания владельца. Действующий transport —
+Telegram; прежняя PWA-проекция снята с production.
 Типизированный item хранит outcome, reason, expectation, provenance, correlation и действие; его
 состояние идёт по CAS revision через `queued -> delivered -> read -> acted` либо становится
 `superseded`. Dedupe не создаёт второй item, coalesce заменяет устаревший, committed corruption
@@ -161,29 +151,14 @@ Snapshot использует target 80 как мягкий history budget, а �
 ограничена, но все `queued`, `delivered` и `read` остаются видимыми даже сверх этого лимита. Создание
 item не вызывает модель.
 Сейчас конкретные producer-интеграции покрывают ответы по Telegram follow-up, terminal
-failure/expiry отправки файла и успешный owner-directed `send_file`, который создаёт PWA-only
-`file_ready`; остальные типы схемы не означают, что все старые уведомления уже мигрировали. Telegram
-transport повторяет queued item со стабильной delivery identity, а PWA меняет `read/acted` только с
-точной revision.
+failure/expiry отправки файла и успешный owner-directed `send_file`; остальные типы схемы не
+означают, что все старые уведомления уже мигрировали. Telegram transport повторяет queued item со
+стабильной delivery identity.
 
-Praxis App обслуживается тем же `mailroom_bot.py` под versioned `/api/praxis/v1`. Telegram initData
-принимается только в `X-Telegram-Init-Data`, device bearer — только в `Authorization`; auth в query
-отклоняется. Missing, invalid, expired или revoked session credential получает HTTP 401, а уже
-аутентифицированный principal без нужного scope — HTTP 403.
-
-Только owner создаёт, перечисляет и отзывает device authority. Одноразовый enrollment secret живёт
-в URL fragment, действует не более 24 часов, погашается один раз и никогда не пишется в ledger;
-device bearer также возвращается один раз, а store сохраняет только HMAC. Device имеет exact scopes,
-не становится owner/delegator и не получает SYSTEM. HMAC-chain событий лежит в
-`memory/access/devices/events.jsonl`, его private key — в `memory/.state/praxis_device_auth.key`;
-их нужно сохранять и восстанавливать вместе.
-
-Service worker кэширует только `/app` и статический shell и никогда не перехватывает `/api/*`.
-IndexedDB хранит один успешно проверенный snapshot и ручные drafts в partition конкретного
-principal/device. 401/revoke очищает этот partition и защищённый DOM; offline draft не отправляется
-автоматически после возвращения сети. Browser file import/export по умолчанию ограничен 64 MiB в
-каждую сторону, stage приватный, body/CAS и run artifact сверяют имя, размер и SHA-256; превышение
-upload cap возвращает HTTP 413. Download выдаётся через короткоживущий ticket, а не bearer в URL.
+`mailroom_bot.py` — отдельный headless-процесс. Он не слушает TCP и не обслуживает HTTP-маршруты:
+периодически вызывает `mailer.fetch`, идемпотентно обновляет `memory/mailbox.json`, присылает новые
+письма владельцу и доставляет proposal/self-merge/host/room notifications. Его остановка не ломает
+on-demand SMTP/IMAP hands Praxis, но лишает их фонового mailbox ingest и proactive notifications.
 
 ## Memory and self
 
@@ -216,7 +191,7 @@ artifact, git/STATE либо owner clarification. Тип источника во
 ранжирование. SQL не является памятью и не управляет задачами.
 
 Не вся папка `memory/.state/` производна. Outbox, membership/follow-up ledgers, owner-delivery,
-device-auth key, PWA staging, control state и receipt journals нужны для точного восстановления и не
+исторические device-auth/PWA state, control state и receipt journals нужны для точного восстановления и не
 должны удаляться как кэш. Удаляемость должна быть заявлена конкретным модулем, а не выведена из
 имени каталога.
 

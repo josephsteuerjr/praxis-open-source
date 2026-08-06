@@ -994,12 +994,36 @@ class FollowUpTraceIsHerMemoryNotOwnerMailTests(_DirectSendTraceHarness):
         self.assertEqual([x["id"] for x in self.ledger.pending_notifications()],
                          [item["id"]])
 
-    def test_her_own_dm_to_the_owner_leaves_no_thread_at_all(self):
-        # Егору её слово видно и так — след здесь был бы бухгалтерией ради бухгалтерии.
+    def test_her_own_dm_to_the_owner_leaves_a_trace_but_never_mail(self):
+        """⚠ 01.08: контракт изменён, и вот чем опровергнута прежняя посылка.
+
+        Здесь стояло «след здесь был бы бухгалтерией ради бухгалтерии: Егору её
+        слово видно и так». Посылка про ЕГО видимость — а след это ЕЁ память.
+        Внутри часового пульса Telethon разорван и буфер лички не читается вовсе
+        (chat_id=None), `said_recently` из боевого кода не зовётся, скретч без
+        chat_id не подхватывается — леджер остаётся ЕДИНСТВЕННЫМ каналом «что я
+        уже сказала и кому». 01.08 в 07:30 и 09:30 по её часам два часовых пульса
+        подряд поздоровались с Егором: второй дважды спросил ленту нитей и оба раза
+        получил чужие нитки 62-часовой давности, потому что записей по его личке в
+        леджере было НОЛЬ из 80.
+
+        Что осталось неизменным и проверяется здесь же: отчёт ему по-прежнему не
+        заводится — то, ради чего исключение вводили 27.07.
+        """
         proof, entry = self._accepted(peer_id=self.OWNER, text=self.SAID,
                                       message_id=1271)
         runner._project_direct_outbox_acceptance(proof, entry)
-        self.assertEqual(self.ledger.list(), [])
+        items = self.ledger.list()
+        self.assertEqual(len(items), 1, "её память о сказанном ему снова пуста")
+        self.assertEqual(items[0].get("sent_excerpt"), self.SAID)
+        self.assertFalse(items[0].get("notify_owner"),
+                         "след превратился в письмо ему — регрессия 27.07")
+        self.assertEqual(items[0].get("notice_source"), "")
+        self.ledger.observe_incoming(
+            peer_id=self.OWNER, sender_id=int(self.OWNER), message_id=1272,
+            text="ок", reply_to_message_id=1271, sender_name="Егор")
+        self.assertEqual(self.ledger.pending_notifications(), [],
+                         "ответ Егора не имеет права породить ему же уведомление")
 
     def test_a_ledger_failure_costs_the_trace_loudly_but_not_the_delivery(self):
         proof, entry = self._accepted(peer_id=self.GROUP, text=self.SAID)

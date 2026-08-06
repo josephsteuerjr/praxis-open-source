@@ -180,9 +180,15 @@ class TestFrozenGroupPass(unittest.IsolatedAsyncioTestCase):
             patch.object(runner, "_recent_msgs", recent),
             patch.object(runner, "_missed", {}),
             patch.object(runner, "_cooldown", return_value=0.0),
-            patch.object(runner, "_group_context_snapshot",
-                         return_value=(wake.context_snapshot +
-                                       "\nБоб: совсем другая тема\nВера: вопрос уже закрыт")),
+            # 04.08: чтение ленты переехало в `_group_context_frozen` — она отдаёт тот же
+            # текст И авторство одним чтением архива. Пустой кортеж записей здесь честен:
+            # это запасной путь по строковому буферу, где своё от чужого отличается только
+            # префиксом, и роли в таком проходе не собираются вовсе. Проверка этого теста —
+            # про замороженный снимок и дельту, а не про роли.
+            patch.object(runner, "_group_context_frozen",
+                         return_value=((wake.context_snapshot +
+                                        "\nБоб: совсем другая тема\nВера: вопрос уже закрыт"),
+                                       ())),
             patch.object(runner, "_last_n_text",
                          side_effect=AssertionError("group pass fetched moving Telegram tail")),
             patch.object(runner, "_buf_push", return_value=None),

@@ -7,7 +7,7 @@
 
 Доступ — только владельцу: тот же HMAC-гейт Telegram WebApp initData, что у
 почты/панели (mailroom_bot), но токеном своего бота (PRAXIS_SERVERAPP_BOT_TOKEN
-из .deploy.env). Публичный HTTPS даёт host-Caddy: srv.203.0.113.10.nip.io → 8093.
+из .deploy.env). Публичный HTTPS даёт host-Caddy: srv.<SERVER_HOST>.nip.io → 8093.
 
 Коллекторы — чистый stdlib, пути инжектируются (PRAXIS_HOST_PROC / PRAXIS_HOSTFS),
 поэтому тестируются фикстурами без докера и без Linux (test_serverapp.py).

@@ -48,10 +48,22 @@ os.environ.setdefault("TELEGRAM_API_HASH", "x")
 os.environ.setdefault("TELEGRAM_SESSION",
                       str(Path(TEST_BASE) / "praxis_test_session"))
 
+# Прививка среды: стенд ОБЪЯВЛЯЕТ конфигурацию, а не наследует её.
+# 03.08.2026 вердикт гейта двигали переменные прода: почтовые креды выдавали
+# владельцу руку сверх объявленного множества, а PRAXIS_SLEEP_WINDOW делал часовой
+# пульс неподъёмным — гейт краснел каждую ночь два часа подряд и закрывал ей дверь
+# Форжа. Правило и обе его стороны — в _standenv.
+import _standenv
+
+DROPPED_ENV = _standenv.sanitize()
+_standenv.install_leak_detector()
+
 if __name__ == "__main__":
     import unittest
 
     print(f"praxis_test: PRAXIS_BASE={TEST_BASE}; живое дерево "
           f"{_REPO}/{{{','.join(_sandbox.LIVE_SUBTREES)}}} закрыто на запись",
           file=sys.stderr)
+    print(f"praxis_test: среда объявлена — снято {len(DROPPED_ENV)} PRAXIS_*-переменных прода, "
+          f"закреплено {len(_standenv.ENV_PIN)}", file=sys.stderr)
     unittest.main(module=None)

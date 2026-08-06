@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import llm
@@ -159,11 +160,33 @@ class TestConfig(Base):
         self.assertEqual(llm.limits().max_tool_iters, 44)
 
     def test_config_not_in_git(self):
+        """Ключи мозга не уезжают в коммит — и правило обязано жить В РЕПО.
+
+        ⚠ 03.08.2026: прежняя редакция принимала ЛЮБОЙ источник игнора. `git
+        check-ignore` возвращает 0 и тогда, когда правило пришло из `core.excludesFile`
+        пользователя или из `.git/info/exclude`, — а обе записи лежат вне репозитория и
+        не переживают ни клон, ни чужую машину. Тест остался бы зелёным и в тот день,
+        когда строка про llm.json пропала бы из `.gitignore` самого репо. Спрашиваем
+        ИСТОЧНИК, а не факт, и отдельно — что файл ещё не отслеживается (на tracked
+        файл .gitignore не действует вовсе).
+
+        Цена ошибки здесь не «красный прогон», а ключи мозга в истории git.
+        """
         if not (llm.REPO / ".git").exists():
             self.skipTest("нет git-репозитория")
-        r = subprocess.run(["git", "-C", str(llm.REPO), "check-ignore", "memory/llm.json"],
+        r = subprocess.run(["git", "-C", str(llm.REPO), "check-ignore", "-v",
+                            "memory/llm.json"],
                            capture_output=True, text=True, timeout=20)
         self.assertEqual(r.returncode, 0, "memory/llm.json обязан быть в .gitignore")
+        source = (r.stdout or "").split(":", 1)[0].strip()
+        self.assertTrue(source.endswith(".gitignore"),
+                        f"правило игнора пришло из {source!r}, а не из .gitignore репо — "
+                        "такая защита не переживёт клон")
+        tracked = subprocess.run(
+            ["git", "-C", str(llm.REPO), "ls-files", "--error-unmatch", "memory/llm.json"],
+            capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(tracked.returncode, 0,
+                            "файл уже отслеживается git — .gitignore на него не действует")
 
     def test_broken_json_keeps_last_good(self):
         self._write_cfg(voice={"model": "glm-good"})
@@ -685,9 +708,30 @@ class TestModelRotation(Base):
             "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.5"]
         self.assertEqual(llm._resolve_model("openai", "gpt-5.6"), "gpt-5.6-sol")
 
-    def test_available_models_skips_network_for_test_client(self):
+    def test_available_models_never_touches_the_wire(self):
+        """⚠ Прежний ассерт смотрел на РЕЗУЛЬТАТ, а не на транспорт.
+
+        `[]` — это одновременно ответ стража и ответ ветки отказа (`except: ids = []`).
+        Убери страж — тест остался бы зелёным в ЛЮБОМ окружении: запрос ушёл бы с
+        пустым бирером, вернулся бы 401, и пустой список пришёл бы «правильным».
+        Ровно через этот шов сеть и текла: `panel.brain_catalog()` делал два живых
+        HTTPS-запроса на каждый свой тест. Теперь смотрим на провод.
+        """
+        llm._MODELS_CACHE.clear()
+        self.addCleanup(llm._MODELS_CACHE.clear)
         llm.use_test_client(FakeStreamOpenAI([]), "openai")
-        self.assertEqual(llm._available_models("openai"), [], "фейк-клиент — сеть не трогаем")
+        with mock.patch("urllib.request.urlopen") as opened:
+            self.assertEqual(llm._available_models("openai"), [])
+        self.assertFalse(opened.called, "фейк-клиент — сеть не трогаем")
+
+    def test_available_models_is_muted_even_without_a_registered_fake(self):
+        """Тот путь, которым текло: у `panel.brain_catalog` фейка нет вовсе."""
+        llm._MODELS_CACHE.clear()
+        self.addCleanup(llm._MODELS_CACHE.clear)
+        with mock.patch.dict(llm._TEST_CLIENTS, {}, clear=True), \
+             mock.patch("urllib.request.urlopen") as opened:
+            self.assertEqual(llm._available_models("anthropic"), [])
+        self.assertFalse(opened.called, "под стендом каталог моделей не ходит наружу")
 
 
 if __name__ == "__main__":

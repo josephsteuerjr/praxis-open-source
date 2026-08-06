@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import shlex
+
+#: Интерпретатор прогона, безопасный для shell-строки проверки.
+_PY = shlex.quote(__import__("sys").executable)
 import tempfile
 import unittest
 from pathlib import Path
@@ -104,8 +108,11 @@ class CompleteForgeCase(unittest.TestCase):
         request = {
             "root": str(self.project), "max_parallel": 2, "timeout": 20,
             "checks": [
-                {"id": "green", "command": "python -c \"print(6*7)\"", "kind": "test"},
-                {"id": "red", "command": "python -c \"raise SystemExit(3)\"", "kind": "test"},
+                # ⚠ 03.08.2026: было голое `python`. Матрица исполняет команду через
+                # shell, то есть проверялось наличие такого алиаса в PATH образа, а не
+                # поведение матрицы. Берём интерпретатор, которым идёт сам прогон.
+                {"id": "green", "command": f"{_PY} -c \"print(6*7)\"", "kind": "test"},
+                {"id": "red", "command": f"{_PY} -c \"raise SystemExit(3)\"", "kind": "test"},
             ],
         }
         request_path = directory / "request.json"

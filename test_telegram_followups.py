@@ -396,8 +396,14 @@ class FollowUpLedgerTests(unittest.TestCase):
         self.assertIn("заказанный отчёт не гаснет никогда", text)
 
         self.assertIn("отчёт Егору: нет — это мой след", self._row(text, trace["id"]))
-        self.assertIn("повод отправки: Поправка: мой рабочий движок",
+        # ⚠ 04.08: ярлык был «повод отправки», и под ним печатался ЕЁ СОБСТВЕННЫЙ
+        # отправленный текст — единственное место кадра, отвечающее на вопрос «что я уже
+        # сказала этому человеку», называло её речь причиной. Теперь два разных факта
+        # подписаны по-разному, и здесь же проверяется, что чужая просьба не выдаётся
+        # за её слова (сам тест заводит request_text = «слова Егора, а не мои»).
+        self.assertIn("я сказала: «Поправка: мой рабочий движок",
                       self._row(text, trace["id"]))
+        self.assertNotIn("я сказала: «слова Егора", self._row(text, trace["id"]))
         self.assertIn("отчёт Егору: заказан им словами", self._row(text, ordered["id"]))
         self.assertIn("отчёт Егору: мой — я включила сама", self._row(text, mine["id"]))
 
@@ -411,7 +417,7 @@ class FollowUpLedgerTests(unittest.TestCase):
         item = self._group_thread(1, sent_excerpt=long_text)
         self.assertEqual(len(item["sent_excerpt"]), 500, "рез записи = 500")
         row = self._row(self.ledger.context(), item["id"])
-        gist = row.split("повод отправки: ", 1)[1].split(";", 1)[0]
+        gist = row.split("я сказала: «", 1)[1].split("»", 1)[0]
         self.assertEqual(len(gist), 240, "рез строки = 240")
         header = self.ledger.context().splitlines()[0]
         self.assertIn("до 240 симв. в строке", header)

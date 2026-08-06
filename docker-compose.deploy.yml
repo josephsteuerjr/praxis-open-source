@@ -1,0 +1,132 @@
+services:
+  praxis:
+    build: .
+    container_name: praxis
+    # Declarative parity with the currently running container: keep resident
+    # Whisper inside a 5.5 GiB RAM / 7 GiB RAM+swap envelope. Поднято 31.07 с 4.5:
+    # контейнер круглосуточно упирался в прежний потолок (memory.peak == memory.max,
+    # 7594 события reclaim) — то есть жил в постоянной отдаче кэша, и любой всплеск
+    # неотдаваемой памяти означал бы cgroup-OOM посреди её хода.
+    mem_limit: 5632m
+    memswap_limit: 7168m
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PRAXIS_EMBEDDINGS=0
+      - PRAXIS_SEMANTIC_RERANK=1
+      - PRAXIS_LIMITS_URL=http://host.docker.internal:5012/v1/limits
+      - PRAXIS_AUDIO_MODEL_DIR=/models/audio
+      - PRAXIS_STT_MODEL=/models/audio/whisper/faster-whisper-large-v3-turbo
+      - PRAXIS_STT_REVISION=
+      - PRAXIS_STT_COMPUTE_TYPE=int8
+      - PRAXIS_STT_CPU_THREADS=3
+      - PRAXIS_STT_BEAM_SIZE=5
+      - PRAXIS_STT_LOCAL_FILES_ONLY=1
+      - PRAXIS_STT_KEEP_LOADED=1
+      # Authenticated HTTP-over-UDS for hardbot. The endpoint reuses this
+      # process' resident Whisper object and has no TCP listener.
+      - PRAXIS_STT_RPC_ENABLED=1
+      - PRAXIS_STT_RPC_SOCKET=/run/praxis-stt/stt.sock
+      - PRAXIS_STT_RPC_TOKEN_FILE=/run/secrets/praxis-stt-client.token
+      - PRAXIS_STT_RPC_MAX_BYTES=15728640
+      - PRAXIS_STT_RPC_RATE_PER_MINUTE=6
+      - PRAXIS_STT_RPC_BURST=2
+      - PRAXIS_STT_RPC_UPLOAD_TIMEOUT=30
+      - PRAXIS_STT_RPC_TEMP_DIR=/run/praxis-stt-tmp
+      - PRAXIS_TTS_BACKEND=piper
+      - PRAXIS_EDGE_VOICE=ru-RU-SvetlanaNeural
+      - PRAXIS_PIPER_MODEL=/models/audio/piper/ru_RU-irina-medium.onnx
+      - PRAXIS_CONTEXT_BUDGET=80000
+      - PRAXIS_LAST_N=80
+      # This deployment's OpenAI-compatible endpoint is our Codex relay, which
+      # translates the hosted tool to the upstream Responses API.
+      - PRAXIS_OPENAI_NATIVE_WEB_SEARCH=1
+    command: python bootguard.py
+    volumes:
+      - ./:/app
+      # Модели тяжёлые и живут вне git/дерева Praxis; в рантайме только читаются.
+      - /opt/praxis-models:/models:ro
+      # Dedicated socket directory plus a read-only client secret. Hardbot
+      # receives matching read-only mounts in its own deployment contour.
+      - type: bind
+        source: /opt/praxis-stt/run
+        target: /run/praxis-stt
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /opt/praxis-stt/secrets/client.token
+        target: /run/secrets/praxis-stt-client.token
+        read_only: true
+        bind:
+          create_host_path: false
+      # PASS 23.2: сокет+токен root-демона praxis-serverd. ТОЛЬКО у praxis (не mailbot/serverapp);
+      # доступ к самому демону всё равно закрыт cgroup-пином на этот контейнер.
+      - /opt/praxis-serverd/run:/run/praxis-serverd:rw
+    # PASS 12.2: доступ к localhost хоста; адрес в конфиге тогда host.docker.internal, не 127.0.0.1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Crash/OOM residue must not persist in the container writable layer.
+    tmpfs:
+      - /run/praxis-stt-tmp:size=32m,mode=0700,noexec,nosuid,nodev
+    restart: unless-stopped
+  mailbot:
+    build: .
+    container_name: praxis-mailbot
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PRAXIS_EMBEDDINGS=0
+      - PRAXIS_SEMANTIC_RERANK=1
+      - PRAXIS_LIMITS_URL=http://host.docker.internal:5012/v1/limits
+      # Пульт/capabilities исполняются в mailbot и должны видеть тот же relay-контракт.
+      - PRAXIS_OPENAI_NATIVE_WEB_SEARCH=1
+    # Headless mail/commit bot: IMAP ingest + Telegram notifications, без HTTP/PWA.
+    command: python mailroom_bot.py   # токен бота читается из .deploy.env самим процессом
+    volumes:
+      - ./:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+  # Серверная обсерватория «Атланта» (mini-app @atlanta2_srv_bot): отдельный демон,
+  # чтобы не трогать praxis/mailbot. Докер видит ТОЛЬКО через socket-proxy (GET, POST=0),
+  # хост — pid:host (/proc) + /:/rootfs:ro; свой код примонтирован read-only.
+  dockerproxy:
+    image: tecnativa/docker-socket-proxy
+    container_name: praxis-dockerproxy
+    environment:
+      - CONTAINERS=1
+      - IMAGES=1
+      - NETWORKS=1
+      - INFO=1
+      - VERSION=1
+      - SYSTEM=1
+      - POST=0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+  serverapp:
+    image: praxis-praxis          # переиспользуем образ praxis: python + aiohttp + git
+    container_name: praxis-serverapp
+    env_file: .env                # PRAXIS_OWNER_ID; токен бота — из .deploy.env (сам читает)
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: python serverapp.py
+    pid: "host"                   # /proc = хостовый: процессы, порты, метрики
+    cap_add:
+      - SYS_PTRACE                # читать /proc/*/fd чужих процессов (кто держит порт)
+    security_opt:
+      - apparmor=unconfined       # docker-default режет ptrace-read к хост-процессам
+    volumes:
+      - ./:/app:ro
+      - /:/rootfs:ro              # диски/пользователи/логины хоста, только чтение
+    ports:
+      - "127.0.0.1:8093:8093"     # за Caddy: srv.203.0.113.10.nip.io
+    depends_on:
+      - dockerproxy
+    restart: unless-stopped
+  # Локальный «мозг»-фолбэк relay (codex/ChatGPT-прокси, host 127.0.0.1:5011, loopback = его
+  # единственная защита на сервере без файрвола) достаётся контейнерами через host-уровневый
+  # Caddy `:5012` (см. /etc/caddy/Caddyfile — remote_ip allowlist приватных диапазонов, наружу
+  # forbidden 403; llm.json openai.base_url = http://host.docker.internal:5012). Раньше здесь
+  # жил свой socat-форвардер relay-fwd — убран, Caddy делает то же самое надёжнее (IP-allowlist
+  # шире одного docker0-шлюза, systemd вместо ad hoc контейнера) — не плодить два резолвера пути.

@@ -25,6 +25,19 @@ def _norm(value: str) -> str:
     return re.sub(r"[^\w]+", " ", text, flags=re.UNICODE).strip()
 
 
+def identity_key(value: str) -> str:
+    """Ключ сравнения имён из `people` — один словарь написаний на весь дом.
+
+    Импорт ленивый и мягкий: адресная книга обязана работать и без досье людей,
+    поэтому отсутствие модуля просто снимает этот тир поиска, а не ломает резолв.
+    """
+    try:
+        import people
+    except Exception:
+        return ""
+    return people.identity_key(str(value or "").lstrip("@"))
+
+
 def _load() -> dict[str, dict]:
     global _CACHE
     with _LOCK:
@@ -142,6 +155,14 @@ def candidates(query: str, limit: int = 8) -> list[dict]:
     q = _norm(query)
     if not q:
         return []
+    # 01.08.2026. Ключ имени складывает написания одного имени (кириллица/латиница,
+    # диакритика, хвост-хэндл). Повод: 01.08 в 08:31 адресация по имени «Егор» дала
+    # отказ «нет в моей адресной книге» — через два часа после того, как она дважды
+    # ему написала. В книге у него значились только латинские формы (`Yegor`,
+    # `Kosyrev`, `tatarskiy_e4pochmak`), а `_norm` кириллицу с латиницей не сводит.
+    # Тир стоит НИЖЕ точного совпадения и ВЫШЕ подстрок: точность не размывается,
+    # но собственное имя человека перестаёт быть непроизносимым.
+    q_key = identity_key(query)
     q_tokens = set(q.split())
     ranked: list[tuple[float, dict]] = []
     now = time.time()
@@ -152,6 +173,8 @@ def candidates(query: str, limit: int = 8) -> list[dict]:
             lexical = 200
         elif q in norms:
             lexical = 140
+        elif q_key and q_key in {k for k in (identity_key(x) for x in aliases) if k}:
+            lexical = 135
         elif any(q_tokens and q_tokens <= set(alias.split()) for alias in norms):
             lexical = 105
         elif any(alias.startswith(q) for alias in norms):

@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import types
+import os
 import unittest
 from pathlib import Path
 
@@ -87,6 +88,15 @@ class Base(unittest.TestCase):
 
 class TestConfig(Base):
     def test_history_turns_raised(self):
+        """Умолчание хвоста — 100, и это проверяется как УМОЛЧАНИЕ.
+
+        ⚠ Константы считаются на импорте `agent` из PRAXIS_HISTORY_TURNS, поэтому до
+        03.08.2026 тест утверждал не умолчание, а то, что было выставлено на сервере.
+        Стенд теперь снимает переменную до первого импорта (_standenv), так что здесь
+        действительно проверяется значение из кода.
+        """
+        self.assertIsNone(os.environ.get("PRAXIS_HISTORY_TURNS"),
+                          "порог задан средой — тест проверял бы не умолчание")
         self.assertEqual(agent.HISTORY_TURNS, 100)
         self.assertEqual(agent.CONSOLIDATE_AT, 90)
 

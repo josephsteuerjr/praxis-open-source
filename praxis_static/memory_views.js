@@ -210,7 +210,8 @@ function plural(count, one, few, many) {
 class Constellation {
   /**
    * @param {{sheet:Function, onError:Function, ariaLabel:string, flavour?:string,
-   *          emptyTitle:string, emptyHint:string, errorTitle:string}} config
+   *          onEmptyTap?:Function, emptyTitle:string, emptyHint:string,
+   *          errorTitle:string}} config
    */
   constructor(host, config = {}) {
     this.host = host;
@@ -237,6 +238,14 @@ class Constellation {
       else this.space?.recenter();
     });
 
+    // Вторая дверь в полноэкранный режим — рядом с первой (тап по пустому месту).
+    // Кнопка нужна не для красоты: тапом сцену не развернуть с клавиатуры, а на
+    // телефоне не всякий догадается ткнуть в пустоту. Обработчик вешает хост —
+    // сцена не знает ни про слой, ни про то, куда её переносят.
+    this.expand = el("button", "mem-chip mem-chip--ghost", "Развернуть");
+    this.expand.type = "button";
+    this.immersive = false;
+
     this.pool = [];             // переиспользуемые DOM-подписи, без пересоздания
     this.space = null;
     this.legacy = null;
@@ -246,6 +255,7 @@ class Constellation {
         ariaLabel: config.ariaLabel,
         onSelect: (node) => this.openDossier(node.id),
         onLabels: (list) => this.paintLabels(list),
+        onEmptyTap: () => this.config.onEmptyTap?.(),
       });
     } catch (_) {
       // Нет WebGL2 — не «сломано», а «рисуем как раньше». Молча и без потери вида.
@@ -458,6 +468,20 @@ class Constellation {
     return this.recenter;
   }
 
+  /** Тот .mem-stage, который РЕАЛЬНО в документе. У отката без WebGL2 он свой, а
+      наш при этом остаётся пустым и никуда не смонтирован — полноэкранный слой,
+      перепутав их, унёс бы на весь экран пустую коробку. */
+  stageEl() {
+    return this.fallback && this.legacy ? this.legacy.stage : this.stage;
+  }
+
+  /** Полноэкранный режим. Слой строит хост; сцена лишь меняет правила жеста и кадр. */
+  setImmersive(on) {
+    this.immersive = Boolean(on);
+    if (this.space) this.space.setImmersive(this.immersive);
+    else this.legacy?.setImmersive(this.immersive);
+  }
+
   /* Ресайз почти всегда ловит ResizeObserver самого холста; ручной вызов нужен
      только при монтировании в display:none-секцию — как и в плоской версии. */
   resize() {
@@ -495,6 +519,7 @@ class Constellation2D {
     this.sheet = sheet;
     this.onError = onError;
     this.destroyed = false;
+    this.immersive = false;     // см. Space3D: развёрнутой сцене жест отдавать некому
 
     this.stage = el("div", "mem-stage");
     this.canvas = el("canvas", "mem-canvas");
@@ -861,10 +886,32 @@ class Constellation2D {
     return true;
   }
 
+  /** ⚠ 03.08.2026. Раньше при `userMoved` смена размера не делала ничего, кроме
+      перерисовки. offsetX/offsetY заданы в ПИКСЕЛЯХ холста, поэтому подвинутая
+      картинка после разворота на весь экран оставалась прижатой к прежнему углу.
+      Масштаб владельца не трогаем — он его выбрал; двигаем только начало координат
+      на половину прироста, чтобы в центре кадра осталась та же точка мира. */
   resize() {
+    const prevWidth = this.width;
+    const prevHeight = this.height;
     if (!this.measure()) return;
     if (!this.userMoved) this.fit(true);
+    else if (prevWidth > 1 && prevHeight > 1) {
+      this.offsetX += (this.width - prevWidth) / 2;
+      this.offsetY += (this.height - prevHeight) / 2;
+    }
     this.paint();
+  }
+
+  /** Полноэкранный режим плоского отката — см. Space3D.setImmersive. */
+  setImmersive(on) {
+    const next = Boolean(on);
+    if (next === this.immersive) return;
+    this.immersive = next;
+    this.gesture = null;
+    this.pointers.clear();
+    this.pinch = null;
+    this.resize();
   }
 
   bounds() {
@@ -1100,14 +1147,17 @@ class Constellation2D {
     gesture.moved += Math.abs(dx) + Math.abs(dy);
     if (gesture.moved <= 5) return;
 
-    // Одним пальцем панорамируем только явно горизонтальный жест.
-    // Вертикаль отдаём странице (`touch-action: pan-y` на .mem-canvas), иначе
-    // сцена съедала бы прокрутку раздела «Память» на телефоне. Двумя пальцами —
-    // это pinch, он обработан выше. Мышь/перо панорамируют как раньше.
+    // ⚠ 03.08.2026. Одним пальцем панорамируем только явно горизонтальный жест —
+    // и только пока сцена свёрнута. Вертикаль отдаём странице (`touch-action:
+    // pan-y` на .mem-canvas). Прежняя редакция пережила правку CSS, где `pan-y`
+    // заменили на `none`, и вертикальный свайп перестал делать что-либо вообще:
+    // страница его не получала, сцена его бросала. Развёрнутая (immersive) сцена
+    // занимает экран целиком — там жест некому отдавать, панорамируем обе оси.
+    // Двумя пальцами — это pinch, он обработан выше. Мышь/перо — как раньше.
     if (!gesture.panning) {
       const totalDx = point.x - gesture.startX;
       const totalDy = point.y - gesture.startY;
-      if (gesture.touch && Math.abs(totalDx) <= Math.abs(totalDy)) return;
+      if (gesture.touch && !this.immersive && Math.abs(totalDx) <= Math.abs(totalDy)) return;
       gesture.panning = true;
     }
 
@@ -1129,6 +1179,14 @@ class Constellation2D {
     if (gesture.moved <= 6 && quick && event.type === "pointerup") {
       const hit = this.hitTest(point.x, point.y);
       if (hit) this.openDossier(hit.id);
+      else if (this.config.onEmptyTap) {
+        // Тап мимо узла разворачивает сцену. У плоского отката выделения нет,
+        // поэтому спорить не с кем — в отличие от 3D, где эта же ветка сначала
+        // снимает подсветку.
+        try {
+          this.config.onEmptyTap();
+        } catch (_) { /* хост не обязан переживать наши ошибки */ }
+      }
     }
   }
 
@@ -1765,12 +1823,15 @@ function block(titleText, hintText) {
   const head = el("header", "mem-block__head");
   const copy = el("div", "mem-block__copy");
   copy.append(el("h3", "", titleText), el("p", "", hintText));
-  head.append(copy);
+  // ⚠ Шапка — flex со space-between: кнопка, положенная в неё напрямую, разведёт
+  // заголовок и кнопки по краям. Кнопок стало две — им нужна общая обойма.
+  const tools = el("div", "mem-block__tools");
+  head.append(copy, tools);
   section.append(head);
-  return { section, head };
+  return { section, head, tools };
 }
 
-export function initMemoryViews({ mount, api, sheet, onError } = {}) {
+export function initMemoryViews({ mount, api, sheet, onError, fullscreenHost, onFullscreen } = {}) {
   destroyMemoryViews();
   if (!(mount instanceof Element) || typeof api !== "function") return null;
 
@@ -1780,9 +1841,63 @@ export function initMemoryViews({ mount, api, sheet, onError } = {}) {
 
   const root = el("div", "mem-views");
 
+  /* ── полноэкранная сцена ────────────────────────────────────────────
+     Сцена физически ПЕРЕЕЗЖАЕТ в хост вне `.view`: у секции есть transform и
+     will-change, а трансформированный предок становится containing block даже для
+     `position: fixed` — класс на .mem-stage дал бы «фуллскрин» размером с секцию.
+     На её место встаёт распорка той же высоты, иначе лента схлопнется и после
+     сворачивания владелец окажется не там, где был. Хоста может не быть (старая
+     оболочка из кэша) — тогда кнопка прячется и тап ничего не делает: молчаливая
+     деградация честнее мёртвой кнопки. */
+  const host = fullscreenHost instanceof Element ? fullscreenHost : null;
+  let opened = null;                  // { scene, slot } — развёрнута ровно одна сцена
+
+  const exitButton = el("button", "mem-chip mem-chip--ghost stage-full__exit", "Свернуть");
+  exitButton.type = "button";
+  exitButton.addEventListener("click", () => exitFullscreen());
+
+  function notifyFullscreen(activeNow) {
+    try { onFullscreen?.(activeNow); } catch (_) { /* хост не обязан переживать наши ошибки */ }
+  }
+
+  function enterFullscreen(scene) {
+    if (!host || opened || !scene) return;
+    const stage = scene.stageEl();
+    const home = stage.parentNode;
+    if (!home) return;                // сцена не смонтирована — разворачивать нечего
+    const slot = el("div", "mem-stage-slot");
+    home.insertBefore(slot, stage);
+    host.replaceChildren(stage, exitButton);
+    host.hidden = false;
+    opened = { scene, slot };
+    scene.setImmersive(true);
+    scene.resize();
+    // Фокус обязан уехать в слой: иначе Tab остался бы в ленте ПОД сценой, а
+    // клавиатурному владельцу выйти было бы нечем, кроме Escape наугад.
+    exitButton.focus({ preventScroll: true });
+    notifyFullscreen(true);
+  }
+
+  function exitFullscreen() {
+    if (!opened) return;
+    const { scene, slot } = opened;
+    opened = null;
+    const stage = scene.stageEl();
+    if (slot.parentNode) slot.parentNode.replaceChild(stage, slot);
+    else stage.remove();              // ленту снесли, пока сцена была в отъезде
+    if (host) {
+      host.replaceChildren();
+      host.hidden = true;
+    }
+    scene.setImmersive(false);
+    scene.resize();
+    if (scene.expand?.isConnected) scene.expand.focus({ preventScroll: true });
+    notifyFullscreen(false);
+  }
+
   const constellationBlock = block(
     "Пространство памяти",
-    "Люди и темы как капли пигмента в объёме: тап — досье, один палец — поворот, два — приблизить.",
+    "Люди и темы как капли пигмента в объёме: тап — досье, тап по пустому — на весь экран, один палец — поворот, два — приблизить.",
   );
   const codeBlock = block(
     "Пространство кода",
@@ -1793,25 +1908,31 @@ export function initMemoryViews({ mount, api, sheet, onError } = {}) {
   const constellation = new Constellation(constellationBlock.section, {
     sheet,
     onError: report,
+    onEmptyTap: () => enterFullscreen(constellation),
     flavour: "memory",
     ariaLabel: "Пространство памяти: люди и темы",
     emptyTitle: "Пространство пусто",
     emptyHint: "Граф памяти ещё не собран — карты PEOPLE и TOPICS пока без узлов.",
     errorTitle: "Граф памяти не прочитался",
   });
-  constellationBlock.head.append(constellation.recenter);
+  constellationBlock.tools.append(constellation.recenter, constellation.expand);
+  constellation.expand.hidden = !host;
+  constellation.expand.addEventListener("click", () => enterFullscreen(constellation));
   constellation.mountInto(constellationBlock.section);
 
   const codeSpace = new Constellation(codeBlock.section, {
     sheet,
     onError: report,
+    onEmptyTap: () => enterFullscreen(codeSpace),
     flavour: "code",
     ariaLabel: "Пространство кода: модули и связи",
     emptyTitle: "Граф кода пуст",
     emptyHint: "Обход репозитория ещё не собирал модули — узлов нет.",
     errorTitle: "Граф кода не прочитался",
   });
-  codeBlock.head.append(codeSpace.recenter);
+  codeBlock.tools.append(codeSpace.recenter, codeSpace.expand);
+  codeSpace.expand.hidden = !host;
+  codeSpace.expand.addEventListener("click", () => enterFullscreen(codeSpace));
   codeSpace.mountInto(codeBlock.section);
 
   const dendro = new Dendrogram({ api, sheet, onError: report });
@@ -1832,9 +1953,14 @@ export function initMemoryViews({ mount, api, sheet, onError } = {}) {
     codeSpace,
     dendro,
     themeObserver,
-    // Порядок важен: сначала наблюдатель, потом сцены, потом DOM — иначе
-    // MutationObserver успеет дёрнуть уже снесённый GL-контекст.
+    exitFullscreen,
+    isFullscreen: () => Boolean(opened),
+    // Порядок важен: сначала свернуть, потом наблюдатель, потом сцены, потом DOM.
+    // Свернуть ПЕРВЫМ обязательно: root.remove() унесёт ленту, и сцена осталась бы
+    // висеть в полноэкранном хосте поверх уже другого раздела. Дальше — как было:
+    // иначе MutationObserver успеет дёрнуть уже снесённый GL-контекст.
     destroy() {
+      exitFullscreen();
       themeObserver.disconnect();
       constellation.destroy();
       codeSpace.destroy();

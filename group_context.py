@@ -635,13 +635,19 @@ def search(peer_id: str | int, query: str, *, topic_id: int | None = None,
 
 
 def _format_message(row: dict, *, max_text: int = 1200,
-                    thread_word: str = "topic") -> str:
+                    thread_word: str = "topic", as_self: bool = False) -> str:
     """Одна строка архива.
 
     `thread_word` — самое частое утверждение во всём её групповом контексте: оно стоит
     в начале КАЖДОЙ строки. Пока комната читалась как форум, каждая строка заявляла
     «topic #93707» — и никакая одна строка ориентации не перевешивает четыре сотни
     таких. Меняется слово, идентификатор остаётся прежним: он её адрес, а не мнение.
+
+    `as_self` — та же строка, но без поля отправителя: она применяется только к ЕЁ
+    собственным сообщениям, когда они едут в модель ролью `assistant`. Подпись «Praxis
+    [id …]» перед своей же репликой превращает речь в сообщение о речи; кто говорит,
+    уже сказано ролью. Всё остальное — ветка, id, время, метка правки, адрес ответа —
+    остаётся на месте: это её координаты в комнате, а не украшение.
     """
     topic = row.get("topic_id")
     title = str(row.get("topic_title") or "").strip()
@@ -667,15 +673,47 @@ def _format_message(row: dict, *, max_text: int = 1200,
         body = (body[:cap]
                 + f"…[ОБРЕЗАНО: показано {cap} из {len(body)} символов; целиком — "
                   f"group_context(action=\"message\", limit={row.get('message_id')})]")
-    return (f"[{topic_mark}; message #{row.get('message_id')}; {row.get('timestamp')}{edited}; "
-            f"{sender}{reply}] {body}")
+    if as_self:
+        head = (f"[{topic_mark}; message #{row.get('message_id')}; "
+                f"{row.get('timestamp')}{edited}")
+        head += ("; " + reply.strip()) if reply else ""
+    else:
+        head = (f"[{topic_mark}; message #{row.get('message_id')}; "
+                f"{row.get('timestamp')}{edited}; {sender}{reply}")
+    return f"{head}] {body}"
 
 
 def context(peer_id: str | int, *, topic_id: int | None, limit: int = 80,
             max_chars: int = 20_000, whole_room: bool = False,
             members: frozenset | set | None = None,
             thread_word: str | None = None) -> str:
-    """Chronological tail of latest revisions for one conversation branch.
+    """Лента комнаты одним текстом — ровно то, чем она была всегда.
+
+    Отбор, потолки и порядок живут в `context_rows`; здесь только склейка. Разделение
+    сделано, чтобы у ленты появился второй вид — по репликам, с сохранённым авторством,
+    — не заводя ВТОРОГО отбора: два независимых прохода разошлись бы молча, и модель
+    читала бы не тот разговор, за который мы потом отвечаем распиской.
+    """
+    return "\n".join(row["line"] for row in context_rows(
+        peer_id, topic_id=topic_id, limit=limit, max_chars=max_chars,
+        whole_room=whole_room, members=members, thread_word=thread_word))
+
+
+def context_rows(peer_id: str | int, *, topic_id: int | None, limit: int = 80,
+                 max_chars: int = 20_000, whole_room: bool = False,
+                 members: frozenset | set | None = None,
+                 thread_word: str | None = None) -> list[dict]:
+    """Та же лента, но строками-записями: `{"self": bool, "line": str, "role_line": str}`.
+
+    `line` — строка архива как была и есть (на ней стоят расписки и прожитый ход).
+    `role_line` — она же для модели: у ЕЁ собственных сообщений без подписи её именем,
+    у чужих совпадает с `line`. `self` — из поля `outgoing` записи, снятого в момент
+    наблюдения; здесь ничего не угадывается по префиксу.
+
+    Служебные строки ленты (корень ветки, пометка обреза) идут с `self=False`: они не
+    чья-то реплика, и приписывать их ей нельзя.
+
+    Chronological tail of latest revisions for one conversation branch.
 
     The branch is the reply CHAIN, not the ``topic_id`` column — because the column is
     exactly what Telegram is unreliable about.  Outside a real forum, Telegram omits
@@ -742,13 +780,37 @@ def context(peer_id: str | int, *, topic_id: int | None, limit: int = 80,
         return (str(row.get("timestamp") or ""), int(row.get("message_id") or 0))
 
     ordered = sorted(latest.values(), key=_order)
-    # ⚠ «Строго добавление» — обещание, которое надо ВЫПОЛНЯТЬ, а не декларировать.
-    # Расширение места складывает в один срез сотни соседних строк, и общий потолок
-    # (`cap`, а ниже — бюджет символов) начинал выбрасывать её собственную ветку, чтобы
-    # уместить соседей: в Грибнице из 97 строк General до правки оставалось 61
-    # (адверсарка 25.07). Строки своей ветки резервируются первыми и вытеснены быть не
-    # могут; соседи занимают то, что осталось. Без расширения набор ровно прежний.
-    if members is not None or whole_room:
+    # ⚠ 04.08. Резервирование ветки применяется ТОЛЬКО там, где ветку провёл Telegram.
+    # Оно появилось 25.07 против настоящей беды: расширение места складывало в один срез
+    # сотни соседних строк, и общий потолок начинал выбрасывать её собственную ветку,
+    # чтобы уместить соседей — в Грибнице из 97 строк General оставалось 61. Лечение
+    # было верным для ФОРУМА.
+    #
+    # Но в не-форуме «ветка» — не всегда цепочка под постом. AbstractDL — это ГРУППА
+    # ОБСУЖДЕНИЯ КАНАЛА: 411 веток, корни которых — посты @abstractDL, плюс общий чат
+    # группы (`topic_id=None`) на сотню тысяч сообщений, из которых в её архиве 2609.
+    # Проснувшись в общем чате, она резервировала ЕГО — и остаток соседям выходил
+    # нулевым, то есть живое обсуждение под постом не попадало в кадр НИКОГДА.
+    # 03.08 в 21:37 Егор спросил в общий чат «о чём они говорят?» — про обсуждение под
+    # постом #96051, которого она не видела ни строкой, и ответила по последнему, что
+    # было в общем чате: разговору суточной давности.
+    #
+    # Решение Егора 04.08: в не-форуме брать хронологический хвост МЕСТА. Гарантия
+    # «увидеть меньше прежнего нельзя» этим не нарушается — она была про форум, где
+    # `whole_room` не включается вовсе.
+    if whole_room:
+        # Хронологический хвост МЕСТА — решение Егора 04.08. Но с ограниченным полом:
+        # у зеркальной беды та же цена. Общий чат AbstractDL — под сотню тысяч сообщений
+        # и ревёт постоянно; проснувшись под постом канала, она получила бы хвост из
+        # одного общего чата и потеряла бы ту самую ветку, в которой отвечает.
+        # Поэтому её ветке гарантирована ТРЕТЬ потолка (её свежие строки), остальное —
+        # честная хронология комнаты. Ни один из двух провалов больше не достижим.
+        floor = max(1, cap // 3)
+        reserved = [row for row in ordered if _narrow(row)][-floor:]
+        keys = {int(row.get("message_id") or 0) for row in reserved}
+        rest = [row for row in ordered if int(row.get("message_id") or 0) not in keys]
+        selected = sorted(reserved + rest[-(cap - len(reserved)):], key=_order)
+    elif members is not None:
         # ⚠ Оговорка `wanted is not None` здесь была дырой ровно в том случае, ради
         # которого правка и делалась: в General форума ветка — корневая, `topic_id`
         # пуст, и резервирование выключалось целиком. `_narrow` про None знает сам.
@@ -820,7 +882,8 @@ def context(peer_id: str | int, *, topic_id: int | None, limit: int = 80,
             if used + len(line) + 1 > budget:
                 # Не молчаливый break: пробуем узкий рендер, и только если и он не влез —
                 # считаем сообщение выпавшим и говорим об этом вслух ниже.
-                line = _format_message(row, max_text=1200, thread_word=word)
+                width = 1200
+                line = _format_message(row, max_text=width, thread_word=word)
                 if used + len(line) + 1 > budget:
                     rest = sum(1 for other in order_newest
                                if int(other.get("message_id") or 0) not in picked
@@ -831,7 +894,16 @@ def context(peer_id: str | int, *, topic_id: int | None, limit: int = 80,
                     else:
                         dropped_near = rest
                     break
-            picked[mid] = line
+            picked[mid] = {
+                "self": row.get("outgoing") is True,
+                "line": line,
+                # Второй рендер снимается только с ЕЁ строк и тем же потолком, каким
+                # уже отрисована первая: иначе роль показывала бы больше или меньше
+                # текста, чем расписка.
+                "role_line": (_format_message(row, max_text=width, thread_word=word,
+                                              as_self=True)
+                              if row.get("outgoing") is True else line),
+            }
             used += len(line) + 1
 
     lines = [picked[int(row.get("message_id") or 0)] for row in selected
@@ -852,14 +924,19 @@ def context(peer_id: str | int, *, topic_id: int | None, limit: int = 80,
     if rest_all - rest_own > 0:
         marks.append(f"в соседних ветках этого же места ещё {rest_all - rest_own}")
     if marks:
-        lines.insert(0, f"…[ЛЕНТА ОБРЕЗАНА: показано {shown} сообщений, "
-                        f"{'; '.join(marks)}. Упирается бюджет символов, не limit: "
-                        f"чтобы увидеть больше, поднимай context_summary_chars комнаты "
-                        f"(manage_room) или спрашивай узко — "
-                        f"group_context(action=\"search\", query=…)]")
+        mark_line = (f"…[ЛЕНТА ОБРЕЗАНА: показано {shown} сообщений, "
+                     f"{'; '.join(marks)}. Упирается бюджет символов, не limit: "
+                     f"чтобы увидеть больше, поднимай context_summary_chars комнаты "
+                     f"(manage_room) или спрашивай узко — "
+                     f"group_context(action=\"search\", query=…)]")
+        lines.insert(0, {"self": False, "line": mark_line, "role_line": mark_line})
     if root_line:
-        lines.insert(0, root_line)
-    return "\n".join(lines)
+        # Корень ветки — это её ТЕМА. Он может быть и её собственным сообщением, но
+        # стоит отдельной строкой впереди ленты, вне хронологии: приписать его роли
+        # `assistant` значило бы начать разговор её репликой, которой в этом месте
+        # ленты не было. Оставляем строкой обстановки.
+        lines.insert(0, {"self": False, "line": root_line, "role_line": root_line})
+    return lines
 
 
 def map_text(peer_id: str | int, *, current_topic: int | None = None,

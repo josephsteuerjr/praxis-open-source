@@ -134,8 +134,13 @@
           <button class="segmented__button is-active" type="button" data-run-filter="all">Все</button>
           <button class="segmented__button" type="button" data-run-filter="active">Активные</button>
           <button class="segmented__button" type="button" data-run-filter="attention">Внимание</button>
-          <button class="segmented__button" type="button" data-run-filter="done">Готовые</button>
+          <!-- ⚠ 03.08.2026. Было «Готовые» при предикате done+cancelled+failed: 73 упавших
+               прогона показывались как готовые. Подпись обязана совпадать с предикатом. -->
+          <button class="segmented__button" type="button" data-run-filter="done">Успешные</button>
         </div>
+        <!-- Сводка по манифестам сервера: список ниже — выборка, и это должно быть видно
+             раньше, чем человек начнёт считать по карточкам. Пустой, пока counts не приехали. -->
+        <div id="runsSummary" class="runs-summary glass" hidden></div>
         <div id="runsList" class="stack-list" aria-live="polite"></div>
       </section>
 
@@ -189,7 +194,7 @@
           <div id="deviceList" class="stack-list"></div>
         </section>
         <section class="domain-section" aria-labelledby="systemTitle">
-          <div class="split-heading"><h2 id="systemTitle">Сервисы</h2><span id="systemHead" class="mono quiet-label">HEAD —</span></div>
+          <div class="split-heading"><h2 id="systemTitle">Сервер</h2><span id="systemHead" class="mono quiet-label">HEAD —</span></div>
           <div id="serviceList" class="stack-list"></div>
           <div class="system-actions glass">
             <button type="button" data-command="system.restart"><svg class="icon"><use href="#i-refresh"></use></svg><span><strong>Мягкий рестарт</strong><small>с durable recovery</small></span></button>
@@ -206,6 +211,17 @@
       <button class="dock__item" type="button" data-nav="memory"><svg class="icon"><use href="#i-memory"></use></svg><span>Память</span></button>
       <button class="dock__item" type="button" data-nav="more"><svg class="icon"><use href="#i-more"></use></svg><span>Ещё</span><i id="navMoreBadge" class="nav-badge" hidden></i></button>
     </nav>
+
+    <!-- ⚠ 03.08.2026. Хост полноэкранной сцены. Внутри #app, но вне `.view` — и то,
+         и другое обязательно. Вне #app нельзя: openSheet глушит табом именно #app
+         (`ui.app.inert = true`), и слой рядом со #scrim остался бы доступен с
+         клавиатуры за открытой шторкой. Внутри `.view` тоже нельзя: у секции есть
+         `transform` и `will-change: transform`, а трансформированный предок
+         становится containing block даже для `position: fixed` — «фуллскрин» вышел
+         бы размером с секцию и был бы обрезан её overflow. При этом #scrim (60) и
+         #sheet (61) — сиблинги #app (z-index 3), поэтому досье узла всё равно
+         открывается НАД развёрнутой сценой. -->
+    <div id="stageFullscreen" class="stage-full" hidden></div>
   </div>
 
   <div id="scrim" class="scrim" hidden></div>

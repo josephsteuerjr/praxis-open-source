@@ -442,8 +442,9 @@ function normalise(graph, maxNodes, maxLinks) {
 export class Space3D {
   /**
    * @param {HTMLCanvasElement} canvas
-   * @param {{onSelect?:Function, onLabels?:Function, maxNodes?:number, maxLinks?:number,
-   *          labelCap?:number, autoRotate?:boolean, ariaLabel?:string}} [opts]
+   * @param {{onSelect?:Function, onLabels?:Function, onEmptyTap?:Function,
+   *          maxNodes?:number, maxLinks?:number, labelCap?:number,
+   *          autoRotate?:boolean, ariaLabel?:string}} [opts]
    * @throws {Error} если нет WebGL2 или highp float — хост обязан откатиться на 2D
    */
   constructor(canvas, opts = {}) {
@@ -454,6 +455,9 @@ export class Space3D {
     this.opts = opts || {};
     this.onSelect = typeof opts.onSelect === "function" ? opts.onSelect : null;
     this.onLabels = typeof opts.onLabels === "function" ? opts.onLabels : null;
+    // Короткий тап по пустому месту. Сцена НЕ знает ни про полноэкранный слой, ни
+    // про то, куда её переносят: она только сообщает хосту о жесте.
+    this.onEmptyTap = typeof opts.onEmptyTap === "function" ? opts.onEmptyTap : null;
     this.maxNodes = clamp(intOf(opts.maxNodes, MAX_NODES), 1, 4000);
     this.maxLinks = clamp(intOf(opts.maxLinks, MAX_LINKS), 0, 12000);
     this.labelCap = clamp(intOf(opts.labelCap, LABEL_CAP), 0, 40);
@@ -504,6 +508,11 @@ export class Space3D {
     this.userMoved = false;
     this.lastInteraction = 0;
     this.selected = null;
+    // ⚠ 03.08.2026. Свёрнутая сцена — полоса 286–420 px внутри прокручиваемой
+    // секции, и вертикальный жест там принадлежит странице (`touch-action: pan-y`
+    // на .mem-canvas). Развёрнутая занимает экран целиком, отбирать не у кого —
+    // и только тогда одним пальцем можно наклонять камеру по обеим осям.
+    this.immersive = false;
 
     /* ── кадры ───────────────────────────────────────────────────── */
     this.running = false;
@@ -956,8 +965,30 @@ export class Space3D {
   _onResize() {
     if (this.destroyed) return;
     if (!this._measure()) return;
+    // ⚠ 03.08.2026. Раньше здесь было только `if (!this.userMoved) this.recenter()`,
+    // и покрученная сцена при смене размера не пересчитывала НИЧЕГО. Пропорции при
+    // этом не врали (аспект проекции живой — _updateMatrices считает его каждый
+    // кадр), а вот `fitDistance` — «дистанция, с которой граф целиком влезает в
+    // кадр» — оставалась от прежнего аспекта. Цена стала видна на развороте: сцена,
+    // которую хоть раз повернули пальцем, разворачивалась на весь экран с рамкой от
+    // полосы в 320 px. _refit() пересчитывает ТОЛЬКО кадрирование и не трогает ни
+    // поворот, ни dolly, ни userMoved: камера остаётся там, куда её поставили.
     if (!this.userMoved) this.recenter();
+    else this._refit();
     this.request();
+  }
+
+  /** Полноэкранный режим: сцена забирает жесты целиком и перекадрируется. */
+  setImmersive(on) {
+    const next = Boolean(on);
+    if (next === this.immersive) return;
+    this.immersive = next;
+    // Жест, начатый в прежней геометрии, продолжать нечем: холст только что уехал
+    // в другого родителя и сменил размер, а pointerup по нему уже не придёт.
+    this.gesture = null;
+    this.pointers.clear();
+    this.pinch = null;
+    this._onResize();
   }
 
   async _inspectBattery() {
@@ -1006,8 +1037,10 @@ export class Space3D {
     return { cx, cy, cz, radius };
   }
 
-  /** Вписать весь граф в кадр. */
-  recenter() {
+  /** Только кадрирование: границы графа и дистанция «всё влезает» под текущий
+      кадр. Ни поворота, ни dolly, ни userMoved — это отдельные решения владельца,
+      и смена размера окна не повод их отменять. */
+  _refit() {
     const { cx, cy, cz, radius } = this._bounds();
     this.center = [cx, cy, cz];
     this.radius = radius;
@@ -1015,6 +1048,12 @@ export class Space3D {
     const fovX = 2 * Math.atan(Math.tan(FOV / 2) * aspect);
     const fit = Math.max(radius / Math.tan(FOV / 2), radius / Math.tan(fovX / 2));
     this.fitDistance = Math.max(60, fit * 1.22);
+    return { cx, cy, cz };
+  }
+
+  /** Вписать весь граф в кадр. */
+  recenter() {
+    const { cx, cy, cz } = this._refit();
     this.dolly = 1;
     this.targetWanted = [cx, cy, cz];
     if (this.reducedMotion || !this.running) this.target = [cx, cy, cz];
@@ -1402,13 +1441,18 @@ export class Space3D {
     gesture.moved += Math.abs(dx) + Math.abs(dy);
     if (gesture.moved <= 5) return;
 
-    // Одним пальцем вращаем только явно горизонтальный жест. Вертикаль отдаём
-    // странице (`touch-action: pan-y` на холсте), иначе сцена съедала бы прокрутку
-    // раздела на телефоне. Двумя пальцами — pinch, он обработан выше.
+    // ⚠ 03.08.2026. Одним пальцем вращаем только явно горизонтальный жест — и
+    // только пока сцена свёрнута. Вертикаль там принадлежит странице
+    // (`touch-action: pan-y` на .mem-canvas), иначе полоса в 320 px съедала бы
+    // главный жест телефона. Прежняя редакция этого условия пережила правку CSS,
+    // где `pan-y` заменили на `none`: страница жест уже не получала, а сцена всё
+    // ещё его бросала — и вертикальный свайп не делал ВООБЩЕ ничего. Теперь
+    // размен снят: свёрнутая отдаёт вертикаль странице, развёрнутая (immersive)
+    // забирает обе оси. Двумя пальцами — pinch, он обработан выше.
     if (!gesture.rotating) {
       const totalDx = point.x - gesture.startX;
       const totalDy = point.y - gesture.startY;
-      if (gesture.touch && Math.abs(totalDx) <= Math.abs(totalDy)) return;
+      if (gesture.touch && !this.immersive && Math.abs(totalDx) <= Math.abs(totalDy)) return;
       gesture.rotating = true;
     }
 
@@ -1445,6 +1489,14 @@ export class Space3D {
       this.selected = null;
       this._uploadStatic();
       this.request();
+    } else if (this.onEmptyTap) {
+      // ⚠ Порядок веток — не украшение. Тап по пустому месту уже занят снятием
+      // выделения; повесь разворот раньше — и один тап делал бы два дела сразу.
+      // Сюда доходит только заведомо короткое касание: перетаскивания и долгие
+      // нажатия отсеяны выше (`gesture.moved > 6 || !quick`).
+      try {
+        this.onEmptyTap();
+      } catch (_) { /* хост не обязан переживать наши ошибки */ }
     }
   }
 
@@ -1548,6 +1600,7 @@ export class Space3D {
     this._emitLabels([]);
     this.onLabels = null;
     this.onSelect = null;
+    this.onEmptyTap = null;
     try { this.loseExt?.loseContext(); } catch (_) { /* необязательная любезность драйверу */ }
   }
 }

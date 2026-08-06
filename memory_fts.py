@@ -121,6 +121,12 @@ def _selected_jsonl(path: Path, memory_dir: Path) -> tuple[str, str] | None:
         # границе раскрытия. Отдельный kind, а не self_event: перепутать её ход в чужой
         # комнате с записью из своей лички нельзя ни в одном потребителе.
         (r"^self/rooms/[^/]+/turns-[^/]+\.jsonl$", "room_turn"),
+        # 02.08.2026. То, что она записывает СЕБЕ САМА (`praxis.authored_note.event.v1`),
+        # не индексировалось вовсе — этого пути в списке просто не было. То есть её
+        # собственные уроки не находил не только автоматический recall, но и явное
+        # «вспомни»: урок написан и невидим. Это и был настоящий блокер её четвёртого
+        # шага «извлечение в точке выбора», а не аллоулист, как мы думали.
+        (r"^notes/events\.jsonl$", "authored_note"),
         (r"^desires/events\.jsonl$", "desire_event"),
         (r"^social/.+\.jsonl$", "social_event"),
         (r"^access/events/[^/]+\.jsonl$", "access_event"),
@@ -515,6 +521,14 @@ def _source_chunks(source: Source) -> tuple[list[dict], int]:
                     if source.kind == "life_event"
                     else memory_provenance.self_event_automatic_recall_allowed(item)
                     if source.kind == "self_event"
+                    # 02.08: её заметки НАМЕРЕННО не в автоматическом канале. Здесь
+                    # умолчание — True, поэтому новый вид иначе молча вошёл бы в её канон;
+                    # а что попадает в кадр на КАЖДОМ ходе — решение Егора и её, не моё
+                    # (граница из чеклиста: состав канона мы своей рукой не двигаем).
+                    # Явный recall их находит с этого коммита — этого хватает, чтобы
+                    # проверить гипотезу «урок возвращается», не меняя её канон.
+                    else False
+                    if source.kind == "authored_note"
                     else True
                 ),
                 "source": str(item.get("actor") or item.get("device_id")
@@ -1093,16 +1107,43 @@ def _automatic_search(query: str, *, base: Path, memory_dir: Path,
     return out
 
 
+def _is_transport_snapshot(rel: str) -> bool:
+    """`memory/runs/**/context.md` — конверт хода, а не её память.
+
+    02.08.2026, её решение по замеру: 154 488 кусков из 379 977 (40.7% кусков, 64.9%
+    текста индекса) — это `context.md`. Он не написан ею: это техническая карточка,
+    которую собирает система, чтобы дать ей ход — схемы, идентификаторы, маршрут, флаги
+    прав, возраст обращения. Её слова: «транспортный след притворяется моей памятью».
+
+    Прячется он именно ЗДЕСЬ, а не при индексации, и это существенно. Автоматический
+    recall его и так не видел; но в `context.md` лежит ДОСЛОВНЫЙ `origin_text` прошлых
+    реплик, поэтому на обычном явном «вспомни» FTS вытаскивал его по точным словам —
+    и её собственный журнал конкурировал с транспортом сто к одному. При этом контракт
+    «generated run context remains explicitly searchable for audit» верен и остаётся: он
+    про возможность посмотреть, а не про то, чтобы это подмешивалось в каждый ответ
+    памяти. Поэтому граница проходит по ЦЕЛИ обращения, а не по составу индекса — файлы
+    и их куски на месте, аудит их достаёт, обычный recall больше не наступает на них.
+    """
+    return rel.startswith("memory/runs/") and rel.endswith("/context.md")
+
+
 def search(query: str, *, base: Path, memory_dir: Path, skills_dir: Path | None = None,
            limit: int = 30, scope: str = "owner", purpose: str = "explicit",
            db_path: Path | None = None) -> list[dict]:
-    """Rank FTS candidates and expose provenance/visibility metadata."""
+    """Rank FTS candidates and expose provenance/visibility metadata.
+
+    ``purpose='audit'`` — третья цель (02.08): всё то же, что explicit, плюс
+    транспортные снимки прогонов. Ровно она сохраняет прежний контракт «run context
+    остаётся явно доступным для аудита», не заставляя её память подмешивать конверт
+    хода в каждый ответ.
+    """
     query = str(query or "").strip()
     if not query:
         return []
     base, memory_dir = Path(base), Path(memory_dir)
     skills_dir = Path(skills_dir) if skills_dir is not None else None
-    purpose = "automatic" if purpose == "automatic" else "explicit"
+    purpose = ("automatic" if purpose == "automatic"
+               else "audit" if purpose == "audit" else "explicit")
     if purpose == "automatic":
         return _automatic_search(
             query, base=base, memory_dir=memory_dir, skills_dir=skills_dir,
@@ -1144,6 +1185,9 @@ def search(query: str, *, base: Path, memory_dir: Path, skills_dir: Path | None 
         # Canon changed twice during one read or the cache cannot be reconciled.
         # Fail closed instead of letting a disposable row become prompt authority.
         candidates = []
+    if purpose != "audit":
+        candidates = [row for row in candidates
+                      if not _is_transport_snapshot(str(row.get("path") or ""))]
     selected = []
     seen_desires: set[str] = set()
     for row in candidates:

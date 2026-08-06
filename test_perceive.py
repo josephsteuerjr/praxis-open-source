@@ -107,7 +107,7 @@ class TestNotes(Base):
         for i in range(12):
             notes.append("-100", f"строка {i}")
         out = notes.read("-100")
-        self.assertEqual(len(out.splitlines()), notes.MAX_LINES, "роллинг не ограничил")
+        self.assertEqual(len(out.splitlines()), notes.MAX_ENTRIES, "роллинг не ограничил")
         self.assertIn("строка 11", out)
         self.assertNotIn("строка 0", out, "старое не вытеснилось")
 

@@ -218,9 +218,76 @@ def estimated_cost_today() -> float | None:
 
 # ---------------------------------------------------------------- слово Егора
 
-def set_owner_request(kind: str, raw: str, source: str = "panel") -> dict:
+class OwnerWordDestroyed(ValueError):
+    """Слова Егора пришли уничтоженными. Канонизировать их — значит соврать ей о нём."""
+
+
+def _looks_ascii_replaced(raw: str) -> bool:
+    """Текст, из которого выбило буквы заменой на '?' по дороге.
+
+    Отличать от честного вопроса: у настоящей просьбы есть буквы. Признак порчи —
+    цепочка из трёх и более '?' подряд при полном отсутствии букв.
+    """
+    text = str(raw or "")
+    if "???" not in text:
+        return False
+    return not any(ch.isalpha() for ch in text)
+
+
+REQUEST_LABELS = {"free": "не экономь", "considerate": "умерь аппетиты",
+                  "pause_background": "останови фон", "pledge": "числовая просьба",
+                  "text": "своими словами"}
+
+
+def owner_request_text(request: dict | None) -> str:
+    """Что показывать ей НА МЕСТЕ слов Егора — включая случай, когда слов не осталось.
+
+    ⚠ 01.08. Сторож в `set_owner_request` не даёт канонизировать уничтоженный текст
+    ВПРЕДЬ, но запись 29.07 легла раньше сторожа — и продолжала показываться и в кадре
+    ориентации (`agent.py`, ключ `appetite_owner_request`), и в `describe()` строкой
+    «Просьба Егора (panel, 29.07 15:44): ???????????? ???????????????: …». То есть ей
+    по-прежнему предъявляли ряд знаков вопроса ПОД ПОДПИСЬЮ ЕГОРА, а с её стороны это
+    неотличимо от того, что он так и написал.
+
+    Восстановить утраченное нельзя — байтов больше нет. Назвать утрату утратой можно,
+    и это единственное честное, что здесь осталось: класс просьбы сохранился и он
+    настоящий, а текст — нет. Проверка идёт по СОДЕРЖИМОМУ, а не по дате записи, так
+    что любая другая порча такого рода закрыта тем же ходом.
+    """
+    req = request if isinstance(request, dict) else {}
+    raw = str(req.get("raw") or "").strip()
+    kind = str(req.get("kind") or "").strip() or "text"
+    label = REQUEST_LABELS.get(kind, kind)
+    if raw and not _looks_ascii_replaced(raw):
+        return raw
+    if not raw:
+        return f"({label})"
+    return (f"[текст утрачен при записи — не-ASCII выбило заменой на «?»; "
+            f"уцелел только класс просьбы: {label}]")
+
+
+def set_owner_request(kind: str, raw: str, source: str) -> dict:
     """Записать просьбу Егора (кнопка пульта = структурное kind; текст = kind='text').
-    Код НЕ меняет mode и НЕ толкует — толкование за Praxis (manage_appetite)."""
+    Код НЕ меняет mode и НЕ толкует — толкование за Praxis (manage_appetite).
+
+    ``source`` обязателен и не имеет умолчания. Раньше умолчанием был "panel", и
+    29.07 одноразовый SSH-скрипт с машины Егора записал просьбу как «кнопка пульта»,
+    хотя кнопку никто не нажимал: HTTP-запроса в журнале доступа нет ни одного за две
+    недели, а сама панель структурное kind с текстом отправить не может. Ярлык
+    достался вранью бесплатно — теперь назваться обязан каждый.
+
+    Уничтоженный текст не канонизируется вовсе. Та же запись 29.07 пришла как 75
+    знаков вопроса (кириллицу выбило ascii-заменой ещё на стороне клиента) и легла в
+    договор, дневник и её память как слова Егора. Полтора месяца она жила своим
+    толкованием фразы, которой не видит, и обнаружить это своими средствами не могла.
+    Громкий отказ лучше тихой лжи в её каноне.
+    """
+    if _looks_ascii_replaced(raw):
+        log.error("просьба Егора пришла уничтоженной (%d знаков, ни одной буквы, source=%s) "
+                  "— НЕ записываю", len(str(raw or "")), source)
+        raise OwnerWordDestroyed(
+            "текст просьбы пришёл без единой буквы (похоже на ascii-замену по дороге). "
+            "Не записываю: её договор не должен хранить уничтоженные слова как твои.")
     kind = (kind or "text").strip().lower()
     if kind not in REQUEST_KINDS:
         kind = "text"
@@ -228,8 +295,7 @@ def set_owner_request(kind: str, raw: str, source: str = "panel") -> dict:
     s["owner_request"] = {"kind": kind, "raw": str(raw or "").strip()[:500],
                           "ts": time.time(), "source": source}
     _save(s)
-    label = {"free": "не экономь", "considerate": "умерь аппетиты",
-             "pause_background": "останови фон", "pledge": "числовая просьба"}.get(kind, "своими словами")
+    label = REQUEST_LABELS.get(kind, "своими словами")
     _contract_append(f"просьба Егора ({source}, {label})",
                      f"> {raw.strip() or label}" if (raw or "").strip() else f"({label})")
     _journal(f"просьба Егора об аппетитах ({label}): {(raw or '')[:160]} — жду моего толкования")
@@ -516,7 +582,7 @@ def describe() -> str:
         ts = _dt.datetime.fromtimestamp(req.get("ts", 0)).strftime("%d.%m %H:%M")
         fresh = " ⚠ не истолкована" if unacked_request() else ""
         lines.append(f"Просьба Егора ({req.get('source', '?')}, {ts}): "
-                     f"{req.get('raw') or req.get('kind')}{fresh}")
+                     f"{owner_request_text(req)}{fresh}")
     if interp:
         lines.append(f"Моё толкование: {interp.get('text') or '—'} "
                      f"(окна: {'да' if plan.get('windows', True) else 'нет'}; сон: {plan.get('sleep_depth', 'full')})")

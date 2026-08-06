@@ -699,9 +699,22 @@ def usage_line() -> str:
         if not isinstance(d, dict) or not d.get("calls"):
             continue
         fb = f", фолбэков {d['fallback']}" if d.get("fallback") else ""
+        # 02.08: не сырая пара r/c, а величина, которая действительно означает расход.
+        # Кэшированный префикс провайдер уже держит; платит она за СВЕЖИЙ вход —
+        # `in − cache_read`. На живом прогоне это 42к на ход при 85% кэша ≈ 6.3к свежего.
+        # До этой ночи `cache_read` через gpt не приходил вовсе, и строка молчала —
+        # молчание читалось как «кэша нет», хотя означало «нам не сказали».
         cr = int(d.get("cache_read", 0))
         cc = int(d.get("cache_creation", 0))
-        cache = f", cache {f'{cr/1000:.1f}к' if cr >= 1000 else cr}r/{f'{cc/1000:.1f}к' if cc >= 1000 else cc}c" if (cr or cc) else ""
+        u_in = int(d.get("in", 0))
+        if cr or cc:
+            share = f", кэш {100 * cr / u_in:.0f}%" if u_in else ""
+            fresh = f", свежего входа {_k(max(0, u_in - cr))}" if u_in else ""
+            cache = f"{share}{fresh}"
+            if cc:
+                cache += f", записи в кэш {_k(cc)}"
+        else:
+            cache = ""
         parts.append(f"{_ROLE_RU[role]} {_k(int(d.get('in', 0)))}→{_k(int(d.get('out', 0)))} ток "
                      f"({d['calls']} выз.{fb}{cache})")
     return ", ".join(parts)
@@ -862,8 +875,35 @@ def _openai_from_completion(resp, model: str) -> LLMResponse:
         text="\n".join(b["text"] for b in blocks if b["type"] == "text").strip(),
         blocks=blocks, stop_reason=_OPENAI_STOP.get(finish, finish),
         usage={"in": int(getattr(usage, "prompt_tokens", 0) or 0),
-               "out": int(getattr(usage, "completion_tokens", 0) or 0)},
+               "out": int(getattr(usage, "completion_tokens", 0) or 0),
+               **({"cache_read": _openai_cached_tokens(usage)}
+                  if _openai_cached_tokens(usage) else {})},
         framework="openai", model=model)
+
+
+def _openai_cached_tokens(usage) -> int:
+    """Кэшированный префикс из openai-совместимого usage, или 0.
+
+    02.08.2026. Кэш на этом пути АВТОМАТИЧЕСКИЙ — провайдер сам кэширует совпадающий
+    префикс, включить его нельзя, его зарабатывают стабильностью байтов. Отчитывается он
+    единственным полем `usage.prompt_tokens_details.cached_tokens`, а мы читали только
+    антропиковские имена (`cache_read`/`cache_creation`) — поэтому в учёте по всем ходам
+    через gpt стояли нули, и это читалось как «кэш не работает». Означало же оно
+    «не сообщено»: отличить одно от другого было нечем, и на этом я построил неверный
+    вывод для Егора. Реле деталь тоже теряло — исправлено тем же заходом.
+    """
+    details = getattr(usage, "prompt_tokens_details", None)
+    if details is None and isinstance(usage, dict):
+        details = usage.get("prompt_tokens_details")
+    if details is None:
+        return 0
+    value = getattr(details, "cached_tokens", None)
+    if value is None and isinstance(details, dict):
+        value = details.get("cached_tokens")
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _openai_from_stream(stream, model: str) -> LLMResponse:
@@ -871,12 +911,13 @@ def _openai_from_stream(stream, model: str) -> LLMResponse:
     parts: list[str] = []
     tools_acc: dict[int, dict] = {}
     finish = "stop"
-    u_in = u_out = 0
+    u_in = u_out = u_cached = 0
     for chunk in stream:
         u = getattr(chunk, "usage", None)
         if u is not None:
             u_in = int(getattr(u, "prompt_tokens", 0) or 0) or u_in
             u_out = int(getattr(u, "completion_tokens", 0) or 0) or u_out
+            u_cached = _openai_cached_tokens(u) or u_cached
         chs = getattr(chunk, "choices", None) or []
         if not chs:
             continue
@@ -913,7 +954,9 @@ def _openai_from_stream(stream, model: str) -> LLMResponse:
                        "name": s["name"], "input": args if isinstance(args, dict) else {}})
     stop = "tool_use" if any(b["type"] == "tool_use" for b in blocks) else _OPENAI_STOP.get(finish, finish)
     return LLMResponse(text=text, blocks=blocks, stop_reason=stop,
-                       usage={"in": u_in, "out": u_out}, framework="openai", model=model)
+                       usage={"in": u_in, "out": u_out,
+                              **({"cache_read": u_cached} if u_cached else {})},
+                       framework="openai", model=model)
 
 
 # --------------------------------------------------------------------------- #
@@ -935,8 +978,14 @@ def _models_url(base_url: str) -> str:
 
 
 def _available_models(framework: str) -> list[str]:
-    """Список id моделей провайдера (кэш TTL). В тестах (фейк-клиент) — сеть не трогаем."""
-    if framework in _TEST_CLIENTS:
+    """Список id моделей провайдера (кэш TTL). Под стендом сеть не трогаем вовсе."""
+    # ⚠ 03.08.2026. У соседа по файлу (`_client_for`) шов PRAXIS_TEST есть, а здесь его
+    # не было — и `panel.brain_catalog()` под тестом уходил ДВУМЯ живыми HTTPS-запросами
+    # на api.z.ai и api.openai.com. Фейк-клиент спасал только там, где его успели
+    # зарегистрировать; в `test_panel_organs` его нет вовсе. Ключей в окружении гейта
+    # тоже нет (форж отдаёт подпроцессу белый список), так что запрос шёл с пустым
+    # бирером на публичный адрес: стенд стучался наружу и ждал таймаута.
+    if os.environ.get("PRAXIS_TEST") or framework in _TEST_CLIENTS:
         return []
     now = _time.time()
     hit = _MODELS_CACHE.get(framework)

@@ -114,6 +114,10 @@ class TestChannelContext(unittest.TestCase):
         self.assertEqual(cc.scope, "group")
 
     def test_awareness_line_group_vs_dm(self):
+        # ⚠ 03.08.2026: размеры 800 и 5 сравнивались с ПЛАВАЮЩИМ порогом
+        # (PRAXIS_GROUP_BIG). Задаём порог сами — тогда проверяется ветка, а не
+        # настройка сервера.
+        self.assertEqual(agent.GROUP_BIG_THRESHOLD, 50, "порог не тот, что в коде")
         big = agent.ChannelContext(is_dm=False, title="abstractDL", size=800, chat_id="-100")
         line = big.awareness_line()
         self.assertIn("abstractDL", line)

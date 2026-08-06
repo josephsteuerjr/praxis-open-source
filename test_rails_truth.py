@@ -49,7 +49,12 @@ _ENV_NAME_RE = re.compile(r"\b(?:PRAXIS|BACKFILL)_[A-Z0-9_]+\b")
 # «вторая половина закона 2 — рельс X в rails.py»: сосед назначает имя у самого порога.
 _HANDOFF_RE = re.compile(r"рельс ([a-z_][a-z0-9_]*) в rails\.py")
 _SKIP_DIRS = {".git", "node_modules", "target", "__pycache__", ".venv", ".pytest_cache",
-              "memory", "soul", "scratchpad"}
+              "memory", "soul", "scratchpad",
+              # Замороженные копии её же кода: форж-воркдиры (15-18.07) и черновики
+              # предложений. Сверка ищет ПРИЗРАКОВ в живом коде, а старая копия делает
+              # призраком любое имя, которое с тех пор убрали, — тест краснеет на живом
+              # дереве, хотя сам код чист (проверено 31.07: падает и на чистом HEAD).
+              "workspace", ".proposals"}
 _CORPUS: dict[str, str] = {}
 
 
@@ -178,7 +183,7 @@ NUMBERS: tuple[tuple[str, str, str, str], ...] = (
      r"(?m)^_SETTLED_KEEP = (\d+)", "{:g} закрытых нитей"),
     ("followup_notice", "mtproto_runner.py", r"for item in pending\[:(\d+)\]", "{:g} писем"),
     ("followup_notice", "telegram_followups.py",
-     r"повод отправки: \{gist\[:(\d+)\]\}", "{:g} симв"),
+     r"я сказала: «\{said\[:(\d+)\]\}»", "{:g} симв"),
     ("followup_notice", "mtproto_runner.py",
      r'response\.get\("text"\) or "\(без текста\)"\)\[:(\d+)\]', "{:g} симв"),
     # Рез чтения вложения на файловой двери кред-пола. Рельс говорил «ни файлом» вообще,
@@ -1491,7 +1496,12 @@ class TestCapabilitiesTellTheTruth(Base):
                         "человеко-владельческий тул пропал из разницы наборов")
 
     def test_human_only_line_catches_the_gated_owner_extra(self):
-        """`send_email` owner-эксклюзивен под mail-гейтом и в frozenset agent НЕ входит.
+        """Строка «что не моё» считается РАЗНИЦЕЙ наборов, а не копией frozenset.
+
+        ⚠ 03.08.2026 сам повод исчез: решением Егора `send_email` стал общей рукой, и
+        owner-эксклюзивов мимо frozenset больше нет. Снимок ниже с тех пор ИСТОРИЧЕСКИЙ,
+        и именно поэтому ценен: функция обязана считать разницу по ЛЮБОМУ снимку, а не
+        по тому, как удачно сегодня сложился гейт.
 
         Здесь подставляется ВХОД чистой функции, а не источник правды: на живом снимке
         (почта у Егора выключена) разница наборов совпадает с frozenset — то есть прежняя
@@ -1706,7 +1716,7 @@ class TestFollowupTraceIsNamed(Base):
         'notify_owner = True\n'
         'sender_name = ""\n'
         'sender_is_owner = False\n'
-        'row += f"; повод отправки: {gist[:240]}"\n'
+        'row += f"; я сказала: «{said[:240]}»"\n'
     )
     LOOSE_RUNNER = (
         'followup_request = telegram_followups.request_from_owner_buffer(\n'
@@ -2470,9 +2480,9 @@ class TestNoteLimitsSurviveWithoutTheModule(Base):
     def test_the_trim_ceiling_is_still_a_product_of_two_live_numbers(self):
         import notes
         value = str(self.rail("scratch_note_lock")["value"])
-        ceiling = int(notes.MAX_LINES * notes._UNLOCKED_TRIM_FACTOR)
+        ceiling = int(notes.MAX_ENTRIES * notes._UNLOCKED_TRIM_FACTOR)
         self.assertIn(f"{ceiling} строк", value)
-        self.assertIn(f"{notes.MAX_LINES}×{int(notes._UNLOCKED_TRIM_FACTOR)}", value)
+        self.assertIn(f"{notes.MAX_ENTRIES}×{int(notes._UNLOCKED_TRIM_FACTOR)}", value)
 
 
 class TestDaemonLimitsIntroducedTonightAreNamed(Base):

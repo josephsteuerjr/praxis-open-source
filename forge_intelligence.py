@@ -844,6 +844,65 @@ def python_command() -> str:
     return "python3"
 
 
+def _unittest_prefix(root: Path, python: str) -> tuple[str, str]:
+    """(префикс команды тестов, чем он обоснован) для этого проекта.
+
+    31.07.2026. Проект может поставлять СВОЮ герметичную дверь в тесты, и тогда
+    `-m unittest` — неправильный вход, а не запасной. У её репо это `praxis_test.py`:
+    `_sandbox` взводится только при импорте, а BASE заморожен модульной константой
+    ещё раньше, поэтому под `-m unittest` песочница встаёт ПОСЕРЕДИНЕ прогона —
+    ~130 падений на чистом дереве, 96 из них один `LiveTreeWriteRefused`.
+
+    Форж держит worktree её собственного репо (`workspace/.forge-worktrees/code-*`),
+    то есть его проверка её кода была красной ПО ПОСТРОЕНИЮ — и она читала это как
+    «мой код сломан», а не «дверь не та». Её авто-мёрж (`selfdev.run_tests`) всё это
+    время звал правильную дверь; красным был только форж.
+    """
+    if (root / "praxis_test.py").is_file():
+        return f"{python} praxis_test.py", "praxis_test.py (герметичная дверь репо)"
+    return f"{python} -m unittest", "test_*.py"
+
+
+def _local_lean_bin(root: Path) -> Path | None:
+    """`lake` из тулчейна, установленного ВНУТРЬ проекта, если он там есть."""
+    for pattern in (".tools/*/bin/lake", ".tools/elan-home/bin/lake"):
+        for candidate in sorted(root.glob(pattern)):
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+    return None
+
+
+def _lake_command(root: Path) -> str:
+    """Команда сборки Lean-проекта; пусто — если собрать нечем.
+
+    Порядок предпочтений — от самого «своего» к самому общему:
+
+    1. ОБЁРТКА ПРОЕКТА (`scripts/build.sh`). 03.08.2026 Praxis заменила вендоренный
+       тулчейн на воспроизводимую установку: `scripts/install-lean.py` качает
+       официальный архив Lean и сверяет SHA-256, отказываясь распаковывать при
+       несовпадении, а `build.sh` кладёт его в PATH и зовёт `lake build`. Это и есть
+       заявленный проектом способ собраться — берём его, а не свой.
+    2. Тулчейн внутри проекта абсолютным путём (elan-раскладка требует ELAN_HOME:
+       без него шим уводит дом в ~/.elan РУТА, то есть мимо проекта).
+    3. Системный `lake`.
+
+    ⚠ Ничего из этого нет — проверку НЕ выдумываем. Пустой план честнее заведомо
+    красного: `forge.verify` ответит «не нашла ни одной проверки», и это правда, а
+    «Lean is not installed» читалось бы как сломанный проект.
+    """
+    local = _local_lean_bin(root)
+    wrapper = root / "scripts" / "build.sh"
+    if wrapper.is_file() and local is not None:
+        return "sh " + shlex.quote(str(wrapper))
+    if local is not None:
+        home = local.parent.parent
+        if home.name == "elan-home":
+            return f"ELAN_HOME={shlex.quote(str(home))} {shlex.quote(str(local))}"
+        return shlex.quote(str(local))
+    found = shutil.which("lake")
+    return shlex.quote(found) if found else ""
+
+
 def discovered_checks(root: Path) -> list[dict]:
     root = root.resolve()
     checks: list[dict] = []
@@ -864,7 +923,8 @@ def discovered_checks(root: Path) -> list[dict]:
         except (OSError, tomllib.TOMLDecodeError):
             pass
     if tests:
-        add("python-unittest", f"{python} -m unittest discover -q", "test", "test_*.py")
+        prefix, why = _unittest_prefix(root, python)
+        add("python-unittest", f"{prefix} discover -q", "test", why)
     if pytest_config:
         add("python-pytest", f"{python} -m pytest -q", "test", "pytest config")
     if any(root.glob("*.py")) or pyproject.is_file():
@@ -885,6 +945,18 @@ def discovered_checks(root: Path) -> list[dict]:
     if (root / "go.mod").is_file():
         add("go-test", "go test ./...", "test", "go.mod")
         add("go-vet", "go vet ./...", "lint", "go.mod")
+    lean_manifest = next((name for name in ("lakefile.lean", "lakefile.toml",
+                                            "lean-toolchain")
+                          if (root / name).is_file()), "")
+    if lean_manifest:
+        lake = _lake_command(root)
+        if lake:
+            command = lake if lake.startswith("sh ") else f"{lake} build"
+            source = "scripts/build.sh" if lake.startswith("sh ") else "lake"
+            add("lean-lake-build", command, "test", f"{lean_manifest} + {source}")
+        # ⚠ Нет lake — проверку НЕ выдумываем. Пустой план честнее заведомо красного:
+        # forge.verify ответит «не нашла ни одной проверки», и это правда, а
+        # «command not found» читалось бы как сломанный проект.
     makefile = root / "Makefile"
     if makefile.is_file():
         targets = _make_targets(makefile)
@@ -911,8 +983,9 @@ def verification_plan(root: Path, base: str = "", *, full: bool = False,
     test_paths = affected.get("tests") or []
     modules = [str(Path(path).with_suffix("")).replace("/", ".").replace("\\", ".") for path in test_paths]
     if modules:
+        prefix, _why = _unittest_prefix(root, python)
         checks.append({"id": "impacted-python-tests",
-                       "command": f"{python} -m unittest -q " + " ".join(shlex.quote(m) for m in modules[:30]),
+                       "command": f"{prefix} -q " + " ".join(shlex.quote(m) for m in modules[:30]),
                        "cwd": ".", "kind": "test", "source": "impact map",
                        "scope": "targeted"})
     discovered = discovered_checks(root)

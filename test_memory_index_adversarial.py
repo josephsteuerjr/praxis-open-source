@@ -231,16 +231,25 @@ class MemoryIndexAdversarialTests(unittest.TestCase):
             self._search("runcontext basilisk", purpose="automatic"), []
         )
 
-        # Explicit recall sees run artifacts and source canon. Bench and generated skill
-        # navigation are intentionally not indexed at all.
+        # 02.08.2026, решение Праксис и Егора по замеру: транспортный снимок хода
+        # (`memory/runs/**/context.md`) больше не подмешивается в ОБЫЧНЫЙ явный recall.
+        # Прежняя посылка «explicit recall sees run artifacts» была верна по намерению
+        # («остаётся доступным для аудита»), но на практике означала другое: в
+        # context.md лежит дословный origin_text прошлых реплик, поэтому FTS вытаскивал
+        # его по точным словам на любом «вспомни», и её журнал конкурировал с 154 488
+        # транспортными кусками (64.9% текста индекса). Граница теперь проходит по ЦЕЛИ
+        # обращения: аудит достаёт всё, память отвечает своим. Файлы и куски на месте.
         for query in (
             "rawlife hydra",
-            "runcontext basilisk",
             "inventory manticore",
             "generic griffin",
         ):
             with self.subTest(explicit=query):
                 self.assertTrue(self._search(query))
+        self.assertEqual(self._search("runcontext basilisk"), [])
+        self.assertTrue(self._search("runcontext basilisk", purpose="audit"))
+        # RECAP и события прогона — не транспорт, они остаются и в обычном recall.
+        self.assertTrue(self._search("rawlife hydra"))
         self.assertEqual(self._search("bench chimera"), [])
         self.assertEqual(self._search("skillindex sphinx"), [])
 

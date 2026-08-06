@@ -32,9 +32,10 @@
 | `run_manager.py` | `memory/runs/`: manifest, append-only WAL, ResultRef/artifact storage, control, recovery, RECAP и promotion. |
 | `run_resume.py` | Read-only reducer WAL/manifest/checkpoint evidence в строгий resume plan с cumulative event/byte/time budgets, не являющимися tool cap. |
 | `run_executor.py` | Исполнитель resume plan с exact revision/event-seq lease и injected callbacks. |
+| `run_snapshot.py` | Формат неизменяемого снимка `context.md`: писатель/читатель `praxis.run.context.v2` («метр в скобках») плюс дословный `render_v1` для отката. Текст гостя лежит под ПОМЕЧЕННЫМ гуттером (`"> "`, а после экранного разрыва — `">LS> "`, `">CR> "` и т. д.), поэтому ни один его кусок не встаёт в колонку 0 ни у парсера, ни у её глаз; конец секции считается по метру, а не ищется регуляркой. `write()` — единственный вход записи: типизированная расписка на любую деградацию (включая НАЗВАННУЮ стрингификацию — имя поля и тип вместо молчаливого `default=str`), фаза выката по `PRAXIS_SNAPSHOT_WRITE` из `.env` (умолчание `v1`; служба читает только `env_file: .env`, не `.deploy.env`). Потолка записи здесь НЕТ — вынесен отдельным заходом. Снимки v1 читаются прежней веткой навсегда. |
 | `process_liveness.py` | Безопасная платформенная проверка PID; на Windows использует process handle/wait, не POSIX signal. |
 | `telegram_outbox.py` | Durable intent/acceptance store для direct text/file и scheduled message/note; stable MTProto random id и immutable staged files. |
-| `owner_delivery.py` | Общий для PWA/Telegram append-only owner inbox: typed outcome, dedupe/coalesce, CAS states, target-80 soft history budget без attention cap и torn-tail evidence. |
+| `owner_delivery.py` | Append-only owner inbox для Telegram (и исторической PWA-проекции): typed outcome, dedupe/coalesce, CAS states, target-80 soft history budget без attention cap и torn-tail evidence. |
 | `telegram_topics.py` | Exact root/topic route и стабильный conversation id для forum messages. |
 | `group_context.py` | Root-bounded append-only group archive, topic/participant projection, search, orientation bundle и backfill receipt. |
 | `telegram_membership.py` | Fsync JSONL state machine sovereign owner/self join/leave и post-acceptance room projection. |
@@ -131,18 +132,16 @@ flow, а `interactive_*`, `system_router.rs` и `local_router.rs` разделя
 fail-closed проверяет фактический foreground HWND/PID перед вводом. `process_liveness.py` использует
 Win32 process handle/wait и никогда не пробует Windows PID через `os.kill(pid, 0)`.
 
-## Praxis App, почта и owner surfaces
+## Почта и owner surfaces
 
 | Файл/каталог | Роль |
 |---|---|
 | `mailer.py` | SMTP/IMAP primitives. |
 | `mailroom.py` | Mail index, bodies by hash, drafts и owner-approved send state. |
-| `mailroom_bot.py` | Telegram bot и HTTP host почты, legacy panel и `/app`; versioned Praxis API различает 401 auth и 403 scope, выдаёт SSE/artifact tickets и bounded multipart import. |
-| `mailapp.html` | Почтовый Mini App frontend. |
+| `mailroom_bot.py` | Headless Telegram bot: IMAP poll/ingest, новые письма, proposal/self-merge/host/room cards, restart signal и contact flow. Production entrypoint не открывает HTTP. |
 | `panel.py`, `panelapp.html`, `panel_static/` | Live repo introspection, capabilities/settings and device panel frontend/assets. |
-| `praxis_app.py` | Scoped snapshot/control model над тем же runtime; durable command/body idempotency, явные access/enrollment replay boundaries, run/artifact projection, owner inbox и 64 MiB default browser file bridge. |
-| `praxis_device_auth.py` | Owner-only one-time enrollment, exact device scopes, HMAC event chain, bearer validation и revoke. |
-| `praxisapp.html`, `praxis_static/` | Installable Praxis PWA: glass/particle shell, scoped controls, partitioned verified snapshot/drafts и shell-only service worker. |
+| `praxis_app.py`, `praxis_device_auth.py` | Retired compatibility modules прежнего web projection; production runtime их не публикует. |
+| `praxisapp.html`, `praxis_static/` | Retired frontend assets; не публикуются и не входят в production runtime surface. |
 | `serverapp.py`, `serverapp.html` | Read-only server observatory backend/frontend. |
 | `logsink.py` | Rotated runtime log sink для owner surfaces. |
 
@@ -158,7 +157,7 @@ Win32 process handle/wait и никогда не пробует Windows PID че
 | `memory/computer/` | Windows evidence и inventory snapshots. |
 | `memory/desires/`, `memory/self/` | Conation events и provenance self observations. |
 | `memory/.forge/` | Единственный task/worker/verification/learning store Forge. |
-| `memory/.state/` | Смешанный runtime-контур: rebuildable индексы плюс durable outbox/control/receipt ledgers, owner delivery, device-auth key и private PWA staging; удаляемость определяется модулем. |
+| `memory/.state/` | Смешанный runtime-контур: rebuildable индексы плюс durable outbox/control/receipt ledgers, owner delivery и историческое device/PWA state; удаляемость определяется модулем. |
 | `memory/access/devices/events.jsonl` | Private HMAC-chained issue/redeem/revoke authority; восстанавливается только вместе с `memory/.state/praxis_device_auth.key`. |
 | `memory/dialogues/`, `memory/access/TRUST.md`, `memory/goals.md` | Приватные ignored runtime-данные: сохраняются на live/backup, но не отслеживаются source Git. |
 | `workspace/` | Рабочие входы/выходы и scoped Telegram inbox, не личность и не task store. |

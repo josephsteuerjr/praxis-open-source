@@ -415,6 +415,40 @@ def diff_text(pid: str, cap: int = 12000) -> str:
     return out[:cap] + ("\n… (обрезано)" if len(out) > cap else "")
 
 
+def live_effect(branch: str, main: str | None = None) -> tuple[str, str]:
+    """Что мёрж этой ветки сделает с ЖИВЫМ деревом СЕГОДНЯ. Только чтение.
+
+    Реконсайлер спрашивал `git diff main...branch` — трёхточечный дифф от точки
+    ответвления, то есть «что ветка изменила относительно СВОЕГО ПРОШЛОГО». Точка
+    ответвления заморожена навсегда, поэтому такой дифф непуст ВСЕГДА, сколько бы
+    живое дерево ни ушло вперёд. А вопрос, который он на самом деле задавал, записан
+    в его же строке причины: «изменение уже в живом дереве». Разные вопросы.
+
+    Цена ошибки была не теоретическая: на 01.08 все 35 building-предложений показывали
+    «ждёт, 1 file changed» при том, что 8 из них не изменили бы ничего, 27 конфликтуют,
+    и ни одно не принесло бы нового кода — она писала их против кода двухнедельной
+    давности, а потом сама же поправила те же места живыми правками.
+
+    ('noop', …) — дерево не изменится; ('conflict', …) — мёрж не пройдёт;
+    ('real', stat) — честный diffstat против живого дерева;
+    ('unknown', '') — git не ответил: молчим, а не врём.
+    """
+    main = main or _main_branch()
+    probe = _git("merge-tree", "--write-tree", "--name-only", main, branch)
+    lines = (probe.stdout or "").split("\n")
+    tree = lines[0].strip() if lines else ""
+    if probe.returncode == 1:
+        hit = len([x for x in lines[1:] if x.strip()])
+        return "conflict", f"против живого дерева: конфликт в {hit} файл(ах)"
+    if probe.returncode != 0 or not tree:
+        return "unknown", ""
+    base = _git("rev-parse", f"{main}^{{tree}}").stdout.strip()
+    if tree == base:
+        return "noop", "против живого дерева: пусто — мёрж ничего не изменит"
+    stat = _git("diff", "--stat", base, tree).stdout.strip().splitlines()
+    return "real", (stat[-1].strip() if stat else "")
+
+
 def _cleanup(pid: str, drop_branch: bool) -> None:
     wt = worktree_path(pid)
     if wt.exists():
@@ -432,7 +466,7 @@ def reconcile() -> dict:
     решает ЗА Praxis: беспредметные оболочки (нет ветки / пустой дифф) закрываются с
     честной причиной, титулованным возвращается имя + заметка в журнал; повторный
     submit с её ревью остаётся её решением."""
-    closed = restored = 0
+    closed = restored = described = 0
     main = _main_branch()
     for t in [x for x in _load() if x.get("status") == "building"]:
         pid = str(t.get("id") or "")
@@ -443,12 +477,22 @@ def reconcile() -> dict:
                     reason="ветка предложения пропала — оболочка после рестарта")
             closed += 1
             continue
-        if not _git("diff", f"{main}...{branch}").stdout.strip():
+        effect, stat = live_effect(branch, main)
+        if effect == "noop":
             _cleanup(pid, drop_branch=True)
             _update(pid, status="rejected", decided_by="auto",
-                    reason="дифф пуст — изменение уже в живом дереве")
+                    reason="мёрж не изменил бы живое дерево — изменение уже в нём")
             closed += 1
             continue
+        if effect in ("conflict", "real") and stat and not str(t.get("diffstat") or "").strip():
+            # Реестр обязан говорить правду о СЕГОДНЯШНЕМ предложении, а не молчать.
+            # Раньше он восстанавливал только title, поэтому у всех оставалось
+            # diffstat='' — и панель, и почта, и её собственный список печатали «без
+            # диффа», хотя в ветке сотни строк, а у конфликтующих не было ни намёка,
+            # что мёрж вообще не пройдёт. Закрывать при этом ничего нельзя: закрытие —
+            # её решение (контракт R1), наше дело — не врать.
+            _update(pid, diffstat=stat)
+            described += 1
         if not str(t.get("title") or "").strip():
             subject = _git("log", "-1", "--format=%s", branch).stdout.strip()
             prefix = f"proposal {pid}: "
@@ -456,11 +500,14 @@ def reconcile() -> dict:
             if recovered and recovered != "без названия":
                 _update(pid, title=recovered)
                 restored += 1
-    if closed or restored:
-        _journal(f"[selfdev] прибрала оболочки предложений: закрыто {closed} (без ветки/пустой дифф), "
-                 f"титулов восстановлено {restored} — титулованные building ждут моего submit или reject")
-        log.info("selfdev.reconcile: closed=%d restored=%d", closed, restored)
-    return {"closed": closed, "restored": restored}
+    if closed or restored or described:
+        told = (f", диффов против живого дерева записано {described}" if described else "")
+        _journal(f"[selfdev] прибрала оболочки предложений: закрыто {closed} (без ветки / мёрж ничего "
+                 f"не изменит), титулов восстановлено {restored}{told} — титулованные building ждут "
+                 f"моего submit или reject")
+        log.info("selfdev.reconcile: closed=%d restored=%d described=%d",
+                 closed, restored, described)
+    return {"closed": closed, "restored": restored, "described": described}
 
 
 def apply(pid: str, by: str = "egor", override_reason: str = "") -> dict:

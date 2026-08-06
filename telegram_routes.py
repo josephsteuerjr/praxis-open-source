@@ -197,6 +197,65 @@ def observe(peer_id, *, kind: str, forum: bool | None = None,
         return dict(epoch)
 
 
+def note_writing(peer_id, *, broadcast=None, linked_chat_id=None,
+                 linked_title: str = "") -> dict:
+    """Записать, что Telegram ответил про ПИСЬМО в это место. -> текущая запись.
+
+    ⚠ Живёт РЯДОМ с эпохами форума, а не внутри них — намеренно. Эпохи отвечают на
+    вопрос «форум ли это», со своей шкалой весов и своей историей смен. «Могу ли я сюда
+    писать» — другой вопрос, и втискивать его в ту же машину значило бы снова назвать
+    одним именем два разных понятия (03.08.2026 мы поймали это дважды за вечер: единицу
+    окна записки и `chat_id`, который был и тиром приватности, и фильтром места).
+
+    Пустое значение НЕ затирает известное: свидетельство приходит откуда придётся, и
+    «я не посмотрел» не должно выглядеть как «я посмотрел и там пусто».
+    """
+    with _LOCK:
+        data = read(peer_id)
+        rec = data.get("writing")
+        if not isinstance(rec, dict):
+            rec = {}
+        if broadcast is not None:
+            rec["broadcast"] = bool(broadcast)
+        if linked_chat_id is not None:
+            rec["linked_chat_id"] = str(linked_chat_id)
+        if linked_title:
+            rec["linked_title"] = str(linked_title)[:120]
+        rec["last_seen_at"] = _now_iso()
+        data["writing"] = rec
+        data["peer_id"] = str(peer_id)
+        _save(peer_id, data)
+        return dict(rec)
+
+
+def writing_of(peer_id) -> dict:
+    """Что мы знаем про письмо в это место. Пусто — не знаем ничего."""
+    rec = read(peer_id).get("writing")
+    return dict(rec) if isinstance(rec, dict) else {}
+
+
+def writing_line(peer_id) -> str:
+    """Фраза для её ориентации. Пусто — сказать нечего, и молчание тут честно.
+
+    Форма ЕЁ условия (28.07): адрес виден ДО выбора, квитанция — после. Поэтому здесь
+    только адрес и природа места; никакой переадресации за неё не делается. Ответить или
+    промолчать — её ход, а не наш.
+    """
+    rec = writing_of(peer_id)
+    if not rec.get("broadcast"):
+        return ""
+    linked, title = rec.get("linked_chat_id"), rec.get("linked_title")
+    if linked:
+        where = (str(title) + " [" + str(linked) + "]") if title else str(linked)
+        return ("Это ВЕЩАТЕЛЬНЫЙ КАНАЛ: читать я тут могу, писать в него — нет. Ответы на "
+                "его посты живут в связанном обсуждении: " + where + ". Хочешь ответить — "
+                "адресуй туда явно; отправка в сам канал вернётся отказом, и человек "
+                "ответа не увидит.")
+    return ("Это ВЕЩАТЕЛЬНЫЙ КАНАЛ: читать я тут могу, писать в него — нет. Какое "
+            "обсуждение с ним связано, я пока не знаю — значит и куда уйдёт ответ, "
+            "сказать не могу. Спроси у Егора адрес, а не отправляй наугад.")
+
+
 def current(peer_id) -> dict:
     """Что мы знаем о комнате сейчас."""
     epochs = read(peer_id)["epochs"]

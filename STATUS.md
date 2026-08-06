@@ -13,18 +13,36 @@
 >
 > Проверять расхождение: `git -C /opt/praxis rev-parse --short HEAD` против шапки ниже.
 
-Снимок сверен с продом **2026-07-27**. Это живой снимок релиза, а не журнал прошлых PASS.
+## Live update 2026-08-06: Praxis Mini App/PWA сняты
+
+- Implementation commit `e1a846aeb2e7cc1c232860bd93c0ae08a3289d2c` развёрнут fast-forward от
+  прежнего live `be1c82891cf503e9dd4e72c6c2c7e37f4b9657d8`.
+- `praxis-mailbot` оставлен как headless-процесс: обязательный IMAP poll/ingest, mailbox index,
+  уведомления о новых письмах, proposal/self-merge/host/room cards, restart signal и contact flow.
+  HTTP listener отсутствует; host binding `8092` удалён; Telegram menu не содержит WebApp.
+- Caddy больше не публикует `praxis.*` и `mail.*`; `/px`, `/app` и прежний mail origin не имеют
+  публичного HTTP-сервиса. Атланта (`srv.*`/`praxis-serverapp`) осталась доступна и отвечает 200.
+- Gate exact commit: targeted mailbot 19 OK; полный Linux suite 3498 OK, 4 skip, два раза подряд.
+  Live checks: IMAP fetch успешен, `memory/mailbox.json` валиден (31 запись), mailbot polling active,
+  `praxis` и `praxis-serverapp` не перезапускались.
+- Rollback: tag `rollback-mailbot-pwa-pre-20260806T002834Z`, tar
+  `/root/praxis-mailbot-pwa-pre-20260806T002834Z.tar.gz`, Caddy backup
+  `/root/Caddyfile.pre-mailbot-headless-20260806T002834Z`, immutable release ref
+  `refs/releases/mailbot-headless-20260806T002834Z-e1a846a`.
+
+Шапка сверена с продом кодом **2026-08-01** (`git rev-parse HEAD`; остальной текст файла с этой сверкой НЕ пересматривался). Это живой снимок релиза, а не журнал прошлых PASS.
 История удалённых спек и прежних статусов остаётся дословно доступна через git.
 
-## Текущее состояние (сверено 2026-07-27)
+## Текущее состояние (шапка сверена 2026-08-01; разделы ниже — прежние)
 
 - **Прод жив и онлайн.** Ядро `praxis` работает, на связи как @praxisintelligence,
   durable resume после рестарта отрабатывает чисто. Инфраструктура-тело (`praxis-serverapp`,
   `praxis-mailbot`, `praxis-serverd`, `praxis-dockerproxy`, body-bridge) живо.
-- **Последний live-код прода:** `fb09430b` «замок форжа не переживает смерть своего держателя»
-  (проверено `git -C /opt/praxis log -1` 27.07). Прежняя строка про `e0150fe` была неверна с
-  19.07 и держалась в файле 8 дней; счётчики тестов и evidence в разделах ниже относятся к
-  ещё более старым релизам и помечены как исторические. `/opt/praxis` — источник правды.
+- **Последний live-код прода:** `ad22cc6b4a0d71ee7d4cb17c98a50f65be877d5b`
+  «уничтоженное слово Егора не показывается ей как его слово»
+  (проверено `git -C /opt/praxis log -1` 29.07). Прежняя строка про `fb09430b` уже отстала;
+  счётчики тестов и evidence в разделах ниже относятся к более старым релизам и помечены как
+  исторические. `/opt/praxis` — источник правды.
   Деплой кода идёт по file-overlay + `docker compose -f docker-compose.deploy.yml restart praxis`
   (код смонтирован, не в образе).
 - **Задеплоены и живут (по порядку):**
@@ -59,6 +77,29 @@
 - **ЗАКРЫТО решением Егора:** PASS 30 Этап 4 (Claude Code CLI как второй раннер) — подписочный
   паттерн «автономный агент гоняет CC unattended» признан серой зоной ToS; строку держали
   открытой после решения, теперь она закрыта здесь же, а не только в чужой памяти.
+
+## Локальный кандидат shared STT — НЕ live
+
+- В изолированной ветке `codex/hardbot-stt-shared-live-cb2ba4e` подготовлен authenticated
+  HTTP-over-UDS endpoint без TCP и второй Whisper-модели. Он использует resident backend
+  `mtproto_runner`, принимает только `ru|uz|auto` и использует штатный accuracy-профиль Praxis
+  (`PRAXIS_STT_BEAM_SIZE=5` в live-конфигурации), ограничивает upload 15 MiB, rate/burst и
+  single-flight, не пишет PII/audio/transcript в лог. Внешний путь не загружает модель и не
+  ставит работу в очередь.
+- Compose-кандидат сохраняет проверенный live envelope `Memory=4608 MiB`,
+  `MemorySwap=6144 MiB`, требует заранее созданные fail-closed bind paths и держит request audio
+  в private 32 MiB tmpfs. После bootguard-рестарта child exact startup-sweep удаляет только
+  same-uid regular temp files собственного prefix; symlink и чужие файлы не трогает.
+- Проверено локально 29.07: `py_compile`, `git diff --check`, Compose parse/contract;
+  `test_media_audio + test_stt_rpc` — 24 tests green на Windows (2 Linux-only skip) и 24 в Linux
+  без skip, включая реальный Unix socket и forced cancellation. С `test_media` общий focused
+  прогон — 51 tests green (Windows 2 skip; Linux 1 platform skip). Независимое adversarial review
+  не нашло P0/P1; найденные bind/crash-residue/malformed-multipart замечания исправлены.
+- На `/opt/praxis` этот кандидат **не переносился**, контейнер не перезапускался. Live остаётся
+  на exact `cb2ba4e`; source-code paths не менялись, а `git status` показывает только прежние
+  runtime-изменения `memory/notes/events.jsonl` и `soul/rails.md`.
+- Активация кандидата требует validated `docker compose up -d --no-deps praxis`: простой
+  `restart praxis` не применит новые mounts, env и declarative resource limits.
 
 > Разделы ниже (архитектура, проверки релиза, Windows/провенанс) описывают базовый релиз **PASS 24**
 > (`905e09d`) и с тех пор построчно под 26–29 не пересматривались: верны по духу архитектуры, но

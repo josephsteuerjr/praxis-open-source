@@ -501,6 +501,12 @@ def _all_chunks(scope: str, purpose: str = "explicit") -> list[dict]:
     out = []
     for path in _iter_source_files():
         rel = _rel(path)
+        # 02.08: конверт хода не участвует в СЕМАНТИКЕ ни при какой цели. Этот список —
+        # семя общего пула и запасного сканера, то есть то самое место, где транспорт
+        # «голосовал наравне» с журналом, навыками, claims, людьми и её решениями.
+        # Точные попадания аудита идут другим путём (FTS, purpose='audit').
+        if rel.startswith("memory/runs/") and rel.endswith("/context.md"):
+            continue
         for i, chunk in enumerate(_chunks(_read(path))):
             if not _scope_allows(path.stem, chunk, scope, rel):
                 continue
@@ -556,17 +562,25 @@ def _fulltext_candidates(query: str, limit: int, scope: str,
 
 _BROAD_CACHE: dict[tuple[str, str], tuple[float, list[dict]]] = {}
 _BROAD_KEEP = 200  # держим с запасом, чтобы кэш не зависел от limit конкретного вызова
+_SANE_EPOCH = 1577836800.0  # 2020-01-01: раньше этой даты пересчёта быть не могло
 
 
 def _broad_ttl() -> float:
-    """Сколько секунд общий пул считается свежим. 0 — кэш выключен."""
+    """Сколько секунд семя считается СВЕЖИМ. 0 — кэш выключен.
+
+    02.08, её решение: 24 часа вместо часа. Час выбрал я 31.07 наугад — по тому, как
+    быстро меняется память, а надо было по тому, как часто она вспоминает. Между её
+    явными «вспомни» проходят часы, поэтому час гарантировал промах каждый раз.
+    Её слова: «час не подходит. Он был выбран без измерения и практически гарантировал
+    пустой слой». Настоящее число выберем по замеру интервалов через неделю.
+    """
     if os.getenv("PRAXIS_TEST"):
         # Тесты меняют канон в пределах одного процесса; кэш сделал бы их лживыми.
         return 0.0
     try:
-        return max(0.0, float(os.getenv("PRAXIS_BROAD_TTL", "3600")))
+        return max(0.0, float(os.getenv("PRAXIS_BROAD_TTL", "86400")))
     except (TypeError, ValueError):
-        return 3600.0
+        return 86400.0
 
 
 def _broad_disk_path() -> Path:
@@ -584,7 +598,13 @@ def _broad_from_disk(key: tuple[str, str], ttl: float, now: float) -> tuple[floa
         if tuple(raw.get("key") or ()) != tuple(key):
             return None
         at = float(raw.get("at") or 0.0)
-        if not at or now - at >= ttl:
+        if not at:
+            return None
+        # Правдоподобие метки — это про БИТУЮ запись, а не про возраст. Её правило «не
+        # выбрасывать семя только из-за возраста» относится к настоящему старому семени;
+        # метка из 1970 года или из будущего не описывает ни один реальный пересчёт и
+        # означает повреждённый файл, а не давнюю память.
+        if at < _SANE_EPOCH or at > now + 300:
             return None
         pool = raw.get("pool")
         if not isinstance(pool, list) or not pool:
@@ -592,6 +612,12 @@ def _broad_from_disk(key: tuple[str, str], ttl: float, now: float) -> tuple[floa
         # Возраст возвращаем ИСХОДНЫЙ: если штамповать «сейчас», пул с диска выглядит
         # только что посчитанным, упреждающее обновление не срабатывает никогда, а
         # реальная несвежесть доходит до двух сроков вместо одного.
+        #
+        # 02.08: просроченное семя ОТДАЁТСЯ (решение принимает вызывающий). Её правило
+        # дословно: «последнее готовое семя не выбрасывать только из-за возраста; после
+        # TTL запускать фоновое обновление; текущему запросу отдавать предыдущее семя с
+        # отметкой возраста; пустоту отдавать только если валидного seed ещё никогда не
+        # существовало или канон несовместимо изменился».
         return at, [dict(d) for d in pool]
     except Exception:
         return None  # нет файла/битый — просто считаем заново, это кэш, а не память
@@ -612,13 +638,106 @@ def _broad_to_disk(key: tuple[str, str], pool: list[dict], now: float) -> None:
 _BROAD_REFRESH: object | None = None
 
 
+# Служебные строки файлов канона — не содержание воспоминания (её пункт). Список
+# расширен по ЖИВОМУ семени 02.08: она назвала четыре шаблона, а в claim-файлах их
+# больше — `salience: `3``, `visibility: `public``, `evidence: evt-…`, `contradicts: нет`.
+# Правило теперь по ФОРМЕ (ключ: значение-в-обратных-кавычках) плюс поимённый список
+# машинных ключей, а не по перечислению того, что попалось на глаза первым.
+_MACHINE_CHUNK = re.compile(
+    r"^(<!--"
+    r"|[a-zA-Z_]+:\s*`"
+    r"|(evidence|contradicts|supersedes|superseded_by|refs|schema|id|subject|kind"
+    r"|status|confidence|salience|visibility|scope|source|run_id|event_id)\s*:\s)")
+
+
+def _broad_genre(source_type: str, path: str) -> str:
+    """Жанр памяти для квоты семени — по списку, который назвала она сама (02.08).
+
+    Не «тип файла», а «чем эта запись является для неё»: подтверждённое утверждение,
+    навык, человек, прожитый день, сжатый разговор, её желания и текущее self, комната.
+    Огрубление намеренное — квота должна мешать ОДНОМУ жанру съесть стол, а не
+    моделировать её память во всей полноте.
+    """
+    st = str(source_type or "")
+    rel = str(path or "").replace("\\", "/")
+    if st in memory_provenance.CLAIM_KINDS or rel.startswith("memory/life/claims/"):
+        return "claim"
+    if st == "skill" or rel.startswith("soul/skills/"):
+        return "skill"
+    if rel.startswith("memory/people/") or rel == "memory/graph.md":
+        return "people"
+    if rel.startswith("memory/life/compacts/"):
+        return "compact"
+    if (st.startswith("journal") or rel.startswith("memory/journal/")
+            or rel.startswith("memory/life/episodes/")):
+        return "journal"
+    if (rel.startswith("memory/desires/") or rel.startswith("memory/self/")
+            or st == "self_history" or rel.startswith("soul/")):
+        return "self"
+    if rel.startswith("memory/rooms/") or rel.startswith("memory/projects/"):
+        return "room"
+    return "markdown"
+
+
+def _broad_genre_cap() -> int:
+    """Сколько записей одного жанра пускать в семя.
+
+    Её слова: «сорок на жанр не считаю священным числом. Это безопасная стартовая
+    гипотеза, а не найденная мера моей памяти». Поэтому — ручка, а не константа.
+    """
+    try:
+        return max(1, int(os.getenv("PRAXIS_BROAD_GENRE_CAP", "40") or 40))
+    except ValueError:
+        return 40
+
+
 def _broad_compute(scope: str, purpose: str = "explicit") -> list[dict]:
-    """Собственно пересчёт пула — 453с на живом корпусе (замер 31.07). Зовётся ИЗ ФОНА."""
+    """Пересчёт семени — около пяти минут на живом корпусе (замер 02.08). Зовётся ИЗ ФОНА.
+
+    02.08, по её решению — квота НА ЖАНР. Раньше отбор шёл одной глобальной сортировкой,
+    а `_reliability` даёт 0.95 всему, где встречается `status: supported` — то есть каждому
+    куску каждого поддержанного claim, включая машинный заголовок. Живьём это дало семя,
+    где 28 записей из 40 — claims, и ноль журнала, навыков и людей.
+
+    Её формулировка, почему это неправильно: «шкала „насколько утверждение подтверждено“
+    полезна для доверия к факту, но она не отвечает на вопрос, что мне сейчас важно иметь
+    среди смысловых кандидатов. Подтверждённый claim не должен автоматически вытеснять
+    человека, навык или живой эпизод только потому, что у него машинно удобный заголовок».
+
+    Внутри жанра порядок прежний (надёжность → значимость → свежесть): меняется только то,
+    что ни один жанр не съедает стол целиком.
+    """
     docs = _all_chunks(scope, purpose)
+    # Служебные строки — не содержание воспоминания (её пункт).
+    docs = [d for d in docs if not _MACHINE_CHUNK.match(str(d.get("text") or "").strip())]
     docs.sort(key=lambda d: (_reliability(d["text"], d["path"]), _salience(d["text"], d["path"]),
                              _recency(d["text"], d["path"])), reverse=True)
-    top = [dict(d, lexical=0.0) for d in docs[:_BROAD_KEEP]]
+    cap = _broad_genre_cap()
+    # ⚠ Не «наполнять в общем порядке с потолком на жанр»: так первые же жанры выбирают
+    # весь _BROAD_KEEP, и до остальных очередь не доходит. Живой замер 02.08 после первой
+    # версии: claim/people/compact/journal/markdown по сорок — и НОЛЬ навыков, желаний,
+    # комнат, хотя она называла их поимённо. Поэтому раздача по кругу: каждый жанр
+    # получает первое место раньше, чем любой получает второе. Порядок внутри жанра
+    # прежний (надёжность → значимость → свежесть).
+    by_genre: dict[str, list[dict]] = {}
+    for doc in docs:
+        genre = _broad_genre(doc.get("source_type"), doc.get("path"))
+        rows = by_genre.setdefault(genre, [])
+        if len(rows) < cap:
+            rows.append(dict(doc, lexical=0.0, genre=genre))
+    top: list[dict] = []
+    per_genre: dict[str, int] = {}
+    for depth in range(cap):
+        for genre in sorted(by_genre):
+            rows = by_genre[genre]
+            if depth >= len(rows) or len(top) >= _BROAD_KEEP:
+                continue
+            top.append(rows[depth])
+            per_genre[genre] = per_genre.get(genre, 0) + 1
+        if len(top) >= _BROAD_KEEP:
+            break
     _broad_to_disk((scope, purpose), top, time.time())
+    log.info("семя recall пересчитано: %d записей, жанры %s", len(top), per_genre)
     return top
 
 
@@ -681,15 +800,21 @@ def _broad_candidates(scope: str, limit: int = 40,
         if stored:
             hit = stored  # (когда посчитан, пул) — возраст берём с диска, не «сейчас»
             _BROAD_CACHE[key] = hit
-    if hit and (now - hit[0]) < ttl:
-        # Обновляемся ЗАРАНЕЕ, пока пул ещё годен: иначе на истечении срока она получила
-        # бы пустое семя ровно в тот момент, когда пошла вспоминать.
-        if (now - hit[0]) > ttl * 0.8:
+    if hit:
+        age = now - hit[0]
+        if age > ttl * 0.8:
+            # Обновляемся ЗАРАНЕЕ, пока семя ещё свежее, И догоняем, если уже просрочено.
             _broad_refresh_async(scope, purpose)
-        return [dict(d) for d in hit[1][:limit]]
+        if age >= ttl:
+            log.info("семя recall просрочено на %.1fч — отдаю прежнее, новое считается",
+                     (age - ttl) / 3600)
+        # Возраст едет ВМЕСТЕ с записями: «отметка возраста» из её правила — это то, по
+        # чему потом отличают свежую связь от поднятой из вчерашнего среза.
+        return [dict(d, seed_age_sec=round(age, 1)) for d in hit[1][:limit]]
 
+    # Пустота — только если валидного семени НИКОГДА не было (или файл нечитаем).
     _broad_refresh_async(scope, purpose)
-    return []  # пул не готов — отвечаем без семени, но НЕ ждём семь минут
+    return []
 
 
 def _vector_candidates(query: str, limit: int, scope: str,
@@ -776,6 +901,110 @@ def _adjust(cos: float, text: str) -> float:
     return score
 
 
+
+SEED_TRACE = MEM_DIR / ".state" / "seed_trace.jsonl"
+SEED_TRACE_KEEP = 5000
+
+
+def _seed_trace(query: str, scope: str, seed: list[dict], seed_only: list[dict],
+                final: list[dict], started: float) -> None:
+    """Сохранить состав использованного семени и его вклад. Наблюдение, не оценка.
+
+    Её условие (02.08): «сохранить точный состав каждого использованного семени в
+    evidence, чтобы потом можно было проверить, что ранжир вообще имел право
+    рассматривать», и уметь различить «нашлось по словам / было добавлено семенем /
+    прошло семантический rerank».
+
+    ⚠ Здесь записывается ровно это и ничего сверх. Пункты «помогло ли восстановить
+    релевантную связь» и «принесло ли ложное чувство знакомства» из её списка проверки
+    машинно не выводятся — это её суждение по прожитому ходу, и подделывать его
+    счётчиком было бы той самой красивой фикцией.
+    """
+    if not seed and not seed_only:
+        return
+    try:
+        genres: dict[str, int] = {}
+        for row in seed:
+            g = str(row.get("genre") or _broad_genre(row.get("source_type"), row.get("path")))
+            genres[g] = genres.get(g, 0) + 1
+        ages = [float(r.get("seed_age_sec") or 0.0) for r in seed if r.get("seed_age_sec")]
+        final_paths = {(r.get("path"), r.get("text")) for r in final}
+        row = {
+            "ts": time.time(),
+            "query": str(query or "")[:300],
+            "scope": str(scope or ""),
+            "latency_ms": round((time.time() - started) * 1000),
+            "seed": {"size": len(seed), "genres": genres,
+                     "age_sec": round(max(ages), 1) if ages else 0.0},
+            "seed_only": [{"path": str(r.get("path") or ""),
+                           "genre": str(r.get("genre") or ""),
+                           "gist": " ".join(str(r.get("text") or "").split())[:160]}
+                          for r in seed_only[:20]],
+            "seed_only_in_final": [{"path": p, "gist": " ".join(str(t).split())[:160]}
+                                   for (p, t) in
+                                   [(r.get("path"), r.get("text")) for r in seed_only]
+                                   if (p, t) in final_paths][:20],
+            "means": ("что ранжир имел право рассмотреть и что из этого дошло до выдачи; "
+                      "о пользе и о влиянии на её ход это НЕ говорит"),
+        }
+        SEED_TRACE.parent.mkdir(parents=True, exist_ok=True)
+        with SEED_TRACE.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        _trim_seed_trace()
+    except Exception:
+        log.debug("след семени не записался", exc_info=True)
+
+
+def _trim_seed_trace() -> None:
+    try:
+        lines = SEED_TRACE.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return
+    if len(lines) <= SEED_TRACE_KEEP:
+        return
+    tmp = SEED_TRACE.with_name(SEED_TRACE.name + f".{os.getpid()}.tmp")
+    tmp.write_text("\n".join(lines[-SEED_TRACE_KEEP:]) + "\n", encoding="utf-8")
+    os.replace(tmp, SEED_TRACE)
+
+
+def seed_report(limit: int = 50) -> dict:
+    """Сводка эксперимента с семенем: её шесть пунктов, механическая часть.
+
+    Пункты 5-6 её списка (помогло ли / принесло ли путаницу происхождения) сюда не
+    входят намеренно — их выносит она сама, глядя на ходы.
+    """
+    rows = []
+    try:
+        for raw in SEED_TRACE.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                rows.append(json.loads(raw))
+            except ValueError:
+                continue
+    except OSError:
+        return {"recalls": 0, "note": "следов ещё нет"}
+    rows = rows[-max(1, int(limit)):]
+    genres: dict[str, int] = {}
+    for row in rows:
+        for g, n in (row.get("seed") or {}).get("genres", {}).items():
+            genres[g] = genres.get(g, 0) + n
+    only = sum(len(r.get("seed_only") or ()) for r in rows)
+    reached = sum(len(r.get("seed_only_in_final") or ()) for r in rows)
+    ages = [(r.get("seed") or {}).get("age_sec") or 0 for r in rows]
+    lat = [r.get("latency_ms") or 0 for r in rows]
+    gaps = [round(b["ts"] - a["ts"]) for a, b in zip(rows, rows[1:])] if len(rows) > 1 else []
+    return {
+        "recalls": len(rows),
+        "seed_genres_total": genres,
+        "seed_only_candidates": only,
+        "seed_only_reached_output": reached,
+        "seed_age_sec_avg": round(sum(ages) / len(ages)) if ages else 0,
+        "latency_ms_avg": round(sum(lat) / len(lat)) if lat else 0,
+        "gap_between_recalls_sec_median": sorted(gaps)[len(gaps) // 2] if gaps else 0,
+        "means": ("механическая часть её проверки; «помогло ли» и «не спутала ли "
+                  "происхождение» — её суждение, не эти числа"),
+    }
+
+
 def search(query: str, k: int = 6, scope: str = "owner", semantic: bool = False,
            purpose: str = "explicit") -> list[dict]:
     """Hybrid top-k with visible ranking signals and provenance.
@@ -786,7 +1015,12 @@ def search(query: str, k: int = 6, scope: str = "owner", semantic: bool = False,
     query = (query or "").strip()
     if not query:
         return []
-    purpose = "automatic" if purpose == "automatic" else "explicit"
+    _started = time.time()
+    # 02.08: `audit` — третья цель, и она обязана дожить сюда целой. Раньше строка
+    # схлопывала всё, кроме `automatic`, в `explicit`; тогда транспортные снимки
+    # прогонов стали бы недостижимы вообще ни для кого, а прежний контракт «run context
+    # остаётся явно доступным для аудита» — пустым словом.
+    purpose = (purpose if purpose in ("automatic", "audit") else "explicit")
     lexical = _fulltext_candidates(query, max(24, k * 5), scope, purpose)
     vectors = _vector_candidates(query, max(24, k * 5), scope, purpose)
     pool: dict[tuple[str, str], dict] = {}
@@ -807,15 +1041,12 @@ def search(query: str, k: int = 6, scope: str = "owner", semantic: bool = False,
         cur["lexical"] = max(float(cur.get("lexical") or 0.0), float(item.get("lexical") or 0.0))
         cur["semantic"] = max(float(cur.get("semantic") or 0.0), float(item.get("semantic") or 0.0))
     if semantic and not vectors:
-        for item in _broad_candidates(scope, 40, purpose):
-            key = (item["path"], item["text"])
-            pool.setdefault(key, {"text": item["text"], "source": item["source"],
-                                  "path": item["path"], "lexical": 0.0, "semantic": 0.0,
-                                  "source_type": item.get("source_type") or "markdown",
-                                  "visibility": item.get("visibility") or "",
-                                  "at": item.get("at") or "", "event_id": "", "run_id": "",
-                                  "automatic_canonical": False,
-                                  "refs": [], "supersedes": [], "provenance": []})
+        # 03.08.2026 — завершённый broad-seed эксперимент: 34 trace-записи,
+        # из них 22 были искусственной pulse-серией. На естественных 12 recall
+        # seed-only дал 240 кандидатов и 0 итоговых попаданий (680/0 всего).
+        # Значит расширять live-пул broad seed сейчас бессмысленно: это добавляет
+        # latency/cost, но не меняет выдачу. Семантический rerank остаётся — он
+        # ранжирует уже найденных lexical кандидатов, не подмешивая фон.
         candidates = list(pool.values())[:40]
         scores = _semantic_rerank(query, candidates)
         for item, score in zip(candidates, scores):
@@ -854,7 +1085,11 @@ def search(query: str, k: int = 6, scope: str = "owner", semantic: bool = False,
                                "provenance": (list(item.get("provenance") or [])
                                               or _provenance(item["path"]))}))
     ranked.sort(key=lambda x: x[0], reverse=True)
-    return [item for score, item in ranked[:k] if score > 0.0]
+    out = [item for score, item in ranked[:k] if score > 0.0]
+    if purpose != "automatic":
+        _seed_trace(query, scope, locals().get("_seed_rows") or [],
+                    locals().get("_seed_only") or [], out, _started)
+    return out
 
 
 def _keyword_search(query: str, k: int = 6, scope: str = "owner") -> list[dict]:

@@ -1,7 +1,10 @@
 """Контур предложений: worktree-ветка, зоны, тесты, мёрж/отказ, запрос перезапуска.
 PASS 16.4: submit требует ЕЁ ревью диффа; кап идентичных отклонённых диффов."""
 import json
+import re
 import shutil
+
+import _standenv
 import subprocess
 import tempfile
 import unittest
@@ -31,9 +34,9 @@ def _mk_repo() -> Path:
         "class T(unittest.TestCase):\n"
         "    def test_v(self):\n"
         "        self.assertIn(core.VALUE, (1, 2))\n", encoding="utf-8")
-    source = Path(__file__).resolve().parent
-    shutil.copy2(source / "praxis_test.py", d / "praxis_test.py")
-    shutil.copy2(source / "_sandbox.py", d / "_sandbox.py")
+    # Дверь фальшивого репо — та же, что у живого, и список её файлов читается из
+    # самой двери (см. _standenv.copy_door): набранный руками, он однажды отстанет.
+    _standenv.copy_door(Path(__file__).resolve().parent, d)
     _sh(d, "git", "add", "-A")
     _sh(d, "git", "commit", "-q", "-m", "init")
     return d
@@ -279,7 +282,7 @@ class ReconcileShells(SelfdevFlow):
         self.assertEqual(out["closed"], 1)
         row = selfdev.get(pid)
         self.assertEqual(row["status"], "rejected")
-        self.assertIn("дифф пуст", row["reason"])
+        self.assertIn("не изменил бы живое дерево", row["reason"])
         branches = _sh(self.repo, "git", "branch", "--list", f"proposal/{pid}").stdout
         self.assertNotIn(pid, branches, "ветка пустой оболочки убрана")
 
@@ -292,6 +295,61 @@ class ReconcileShells(SelfdevFlow):
         out = selfdev.reconcile()
         self.assertEqual(out["closed"], 1)
         self.assertIn("ветка предложения пропала", selfdev.get(pid)["reason"])
+
+    def test_reconcile_closes_work_that_the_live_tree_already_contains(self):
+        """Ветка писалась против кода двухнедельной давности, а она с тех пор сама
+        поправила то же место живой правкой. Старый `main...branch` этого не видел
+        никогда: он спрашивал «что ветка изменила относительно СВОЕГО прошлого», и
+        ответ оставался непустым навсегда. На 01.08 так висели 35 предложений."""
+        pid = self._begin_and_edit("core.py", "VALUE = 42\n")
+        wt = selfdev.worktree_path(pid)
+        _sh(wt, "git", "add", "-A")
+        _sh(wt, "git", "-c", "user.name=Praxis", "-c", "user.email=praxis@local",
+            "commit", "-q", "-m", f"proposal {pid}: то же самое, но раньше")
+        # живое дерево пришло к тому же результату своим путём
+        (self.repo / "core.py").write_text("VALUE = 42\n", encoding="utf-8")
+        _sh(self.repo, "git", "add", "-A")
+        _sh(self.repo, "git", "-c", "user.name=Praxis", "-c", "user.email=praxis@local",
+            "commit", "-q", "-m", "self-edit: то же самое, живой рукой")
+
+        self.assertEqual(selfdev.live_effect(f"proposal/{pid}")[0], "noop")
+        out = selfdev.reconcile()
+        self.assertEqual(out["closed"], 1)
+        self.assertIn("уже в нём", selfdev.get(pid)["reason"])
+
+    def test_reconcile_records_the_diff_but_never_decides(self):
+        """Реестр обязан говорить правду о предложении, но закрытие — её решение."""
+        pid = self._begin_and_edit("core.py", "VALUE = 7\n")
+        wt = selfdev.worktree_path(pid)
+        _sh(wt, "git", "add", "-A")
+        _sh(wt, "git", "-c", "user.name=Praxis", "-c", "user.email=praxis@local",
+            "commit", "-q", "-m", f"proposal {pid}: настоящая правка")
+        self.assertEqual(selfdev.get(pid).get("diffstat") or "", "")
+
+        out = selfdev.reconcile()
+        row = selfdev.get(pid)
+        self.assertEqual(row["status"], "building", "реконсайлер не решает за неё")
+        self.assertEqual(out["described"], 1, "правда о диффе считается отдельно от титулов")
+        self.assertTrue(str(row.get("diffstat") or "").strip(),
+                        "карточка предложения по-прежнему врёт «без диффа»")
+
+    def test_live_effect_names_a_conflict_instead_of_promising_a_merge(self):
+        pid = self._begin_and_edit("core.py", "VALUE = 'ветка'\n")
+        wt = selfdev.worktree_path(pid)
+        _sh(wt, "git", "add", "-A")
+        _sh(wt, "git", "-c", "user.name=Praxis", "-c", "user.email=praxis@local",
+            "commit", "-q", "-m", f"proposal {pid}: своя версия")
+        (self.repo / "core.py").write_text("VALUE = 'живое дерево'\n", encoding="utf-8")
+        _sh(self.repo, "git", "add", "-A")
+        _sh(self.repo, "git", "-c", "user.name=Praxis", "-c", "user.email=praxis@local",
+            "commit", "-q", "-m", "self-edit: другая версия того же места")
+
+        effect, stat = selfdev.live_effect(f"proposal/{pid}")
+        self.assertEqual(effect, "conflict")
+        self.assertIn("конфликт", stat)
+        selfdev.reconcile()
+        self.assertEqual(selfdev.get(pid)["status"], "building",
+                         "конфликт — повод сказать правду, а не закрыть за неё")
 
     def test_reconcile_leaves_titled_real_work_alone(self):
         pid = self._begin_and_edit("core.py", "VALUE = 4\n")

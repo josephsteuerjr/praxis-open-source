@@ -1,15 +1,9 @@
-"""
-Praxis mailroom — толстый клиент: бот @praxis_mail_bot + mini-app (Telegram Web App).
+"""Headless Praxis mail/commit bot.
 
-Отдельный процесс/сервис. Поллит IMAP (mailer.fetch), ведёт mailbox.json (mailroom), на НОВОЕ
-письмо пушит Егору и отдаёт Web App для удобного просмотра: список входящих → открыть письмо →
-«Праксис, ответь» (compose, её голос) → увидеть черновик → Approve/Reject. Отправка человеко-
-подтверждена (mailroom.send_approved по approve). Токены LLM тратятся ТОЛЬКО на compose, не на
-поллинг/уведомления.
-
-Доступ к API mini-app — только владельцу: каждый запрос несёт Telegram WebApp initData, мы
-проверяем HMAC бот-токеном и сверяем user.id == PRAXIS_OWNER_ID. Публичный HTTPS даёт Caddy
-(reverse_proxy на 127.0.0.1:PORT), домен — *.nip.io (стабильный, без DNS-возни).
+The production entrypoint intentionally opens no HTTP listener and publishes no Telegram WebApp.
+It keeps the required IMAP polling/ingest, new-mail notifications, proposal/commit cards, restart
+signal and the native contact flow.  The former HTTP handlers remain importable only as retired
+compatibility code; ``main()`` never starts them.
 """
 from __future__ import annotations
 
@@ -17,6 +11,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import logging
 import os
 import tempfile
@@ -29,7 +24,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
-                           KeyboardButtonRequestUsers, MenuButtonWebApp, Message,
+                           KeyboardButtonRequestUsers, MenuButtonDefault, Message,
                            ReplyKeyboardMarkup, WebAppInfo)
 from dotenv import load_dotenv
 
@@ -62,14 +57,40 @@ logsink.attach("mailbot")
 
 TOKEN = os.getenv("PRAXIS_MAIL_BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("PRAXIS_OWNER_ID", "0") or 0)
-WEBAPP_URL = os.getenv("PRAXIS_MAILAPP_URL", "https://mail.203.0.113.10.nip.io/")
+_SERVER_HOST = (os.getenv("SERVER_HOST") or "").strip()
+
+
+def _nip_origin(sub: str, path: str = "/") -> str:
+    """Публичный адрес контура — ИЗ SERVER_HOST, а не из примера в исходнике.
+
+    ⚠ 03.08.2026. Здесь стояли заглушки `mail.203.0.113.10.nip.io` и
+    `praxis.203.0.113.10.nip.io` — адреса из диапазона RFC 5737, отведённого под
+    ДОКУМЕНТАЦИЮ, то есть заведомо несуществующие. Переменные PRAXIS_MAILAPP_URL и
+    PRAXIS_APP_URL в окружении не заданы, поэтому побеждали именно заглушки — а бот
+    на старте СВОИМИ РУКАМИ ставил по ним кнопку мини-аппа (`set_chat_menu_button`).
+
+    Приложение в Telegram из-за этого не открывалось вовсе, и ошибки нигде не было:
+    и бот, и сервер отвечали 200, просто кнопка вела в никуда. Ровно тот же класс,
+    что и остальное в этой волне, — хранимая копия, разошедшаяся с правдой. Адрес
+    теперь вычисляется из того, что его задаёт.
+
+    Пусто — значит хост неизвестен. Тогда лучше НЕ ставить кнопку вообще, чем
+    поставить её в никуда: см. main(), там это сказано вслух в лог.
+    """
+    if not _SERVER_HOST:
+        return ""
+    return f"https://{sub}.{_SERVER_HOST}.nip.io{path}"
+
+
+WEBAPP_URL = os.getenv("PRAXIS_MAILAPP_URL") or _nip_origin("mail")
 # ?v= — кэш-бастер: смена значения заставляет Telegram-клиент перетянуть свежий HTML
-PANEL_URL = os.getenv("PRAXIS_PANEL_URL", WEBAPP_URL.rstrip("/") + "/panel?v=11")
+PANEL_URL = (os.getenv("PRAXIS_PANEL_URL")
+             or (WEBAPP_URL.rstrip("/") + "/panel?v=11" if WEBAPP_URL else ""))
 # Кнопка «Praxis» в боте и база enroll-ссылок ведут на чистый изолированный origin
 # praxis…nip.io/px: у него нет service worker и он никогда не кэшируется (см. serve_px_*),
 # поэтому «старое приложение» там воскреснуть не может. Внутри Telegram вход идёт по
 # initData автоматически; по enroll-ссылке в Safari устройство привязывается в один тап.
-PRAXIS_APP_URL = os.getenv("PRAXIS_APP_URL", "https://praxis.203.0.113.10.nip.io/px")
+PRAXIS_APP_URL = os.getenv("PRAXIS_APP_URL") or _nip_origin("praxis", "/px")
 PORT = int(os.getenv("PRAXIS_MAILAPP_PORT", "8092") or 8092)
 POLL_SEC = float(os.getenv("PRAXIS_MAIL_POLL_SEC", "120") or 120)
 FETCH_LIMIT = int(os.getenv("PRAXIS_MAIL_FETCH", "10") or 10)
@@ -219,8 +240,10 @@ def _praxis_viewer(request: web.Request) -> praxis_app.Viewer | None:
 
 
 # --------------------------------------------------------------------------- #
-#  Legacy mail mini-app API.  The fresh /api/praxis boundary below uses
-#  owner-rooted Telegram auth or exact-scope device credentials.
+#  Свежая граница /api/praxis: owner-rooted Telegram-авторизация либо
+#  устройство с точным скоупом.  Старый мейл-апп (mailapp.html, / , /api/inbox,
+#  /api/letter) снесён 03.08.2026: на него не ссылалось ничего, кроме собственных
+#  обработчиков, а весь трафик на / был сканерами (.env, .git/config, phpinfo.php).
 # --------------------------------------------------------------------------- #
 
 def _preview(e: dict, n: int = 200) -> dict:
@@ -228,26 +251,6 @@ def _preview(e: dict, n: int = 200) -> dict:
     return {"hash": e.get("hash"), "from": e.get("from", ""), "subject": e.get("subject", ""),
             "status": e.get("status", ""), "date": e.get("date", ""),
             "preview": (e.get("body", "") or "")[:n], "has_draft": bool((e.get("draft") or "").strip())}
-
-
-async def api_inbox(request: web.Request):
-    if not _owner(request):
-        return _deny()
-    items = await asyncio.to_thread(mailroom.list_open)
-    return web.json_response({"items": [_preview(e) for e in items]})
-
-
-async def api_letter(request: web.Request):
-    if not _owner(request):
-        return _deny()
-    e = await asyncio.to_thread(mailroom.get, request.match_info["hash"])
-    if not e:
-        return web.json_response({"error": "not found"}, status=404)
-    return web.json_response({
-        "hash": e.get("hash"), "from": e.get("from", ""), "subject": e.get("subject", ""),
-        "date": e.get("date", ""), "body": e.get("body", ""), "draft": e.get("draft", ""),
-        "status": e.get("status", ""),
-    })
 
 
 async def api_compose(request: web.Request):
@@ -280,15 +283,6 @@ async def api_reject(request: web.Request):
     return web.json_response({"hash": h, "ok": bool(ok)})
 
 
-async def serve_app(request: web.Request):
-    """Статика mini-app (HTML). Сам HTML авторизацию делает initData'ом на API-запросах."""
-    html = BASE / "mailapp.html"
-    if html.exists():
-        # no-store: Telegram-вебвью охотно кэширует HTML — свежая панель важнее байтов
-        return web.FileResponse(html, headers={"Cache-Control": "no-store"})
-    return web.Response(text="mailapp.html не найден", status=500)
-
-
 # --------------------------------------------------------------------------- #
 #  Панель устройства (PASS 4, слой 2): /panel + /api/panel/* — owner-only,
 #  read-only интроспекция (логика в panel.py), LLM только explicit (explain/ask)
@@ -316,10 +310,59 @@ async def serve_panel_vendor(request: web.Request):
 #  PASS 24 Praxis mini-app.  Fresh, versioned surface over the same runtime.
 # --------------------------------------------------------------------------- #
 
+_ASSET_STAMP: dict = {}
+_VERSION_QUERY = re.compile(r"\?v=[0-9a-fA-F]+")
+_SHELL_CACHE_NAME = re.compile(r"praxis-shell-[A-Za-z0-9._-]+")
+
+
+def _asset_stamp() -> str:
+    """Отпечаток оболочки — из содержимого ассетов, а не число в исходнике.
+
+    ⚠ 03.08.2026. Номер версии жил в ТРЁХ копиях и разошёлся: `praxisapp.html`
+    просил `?v=31`, `sw.js` прекэшировал `?v=30`, а маршрут /px переписывал 31→32.
+    Следствий два, и оба тихие. Прекэш складывал URL, которых страница не
+    запрашивает. А реальные `?v=31` шли по stale-while-revalidate — то есть после
+    обновления апп ПЕРВЫЙ РАЗ показывал старую сборку, и свежая доезжала только к
+    следующему открытию. Плюс имя кэша `praxis-shell-pass30-v2` не менялось, поэтому
+    `activate` не удалял ничего: старые версии жили в браузере бессрочно.
+
+    Отпечаток, посчитанный из байтов, не может разойтись с байтами. Любая правка
+    ассета даёт новое имя кэша, `activate` сносит прежние, и клиент получает свежее
+    с первого раза.
+    """
+    # ⚠ 03.08.2026, вторая правка. В отпечатке не было модулей сцен, а они грузятся
+    # из app.js БЕЗ `?v=` (`import ... "/app/static/memory_views.js"`), и sw.js отдаёт
+    # весь /app/static/* cache-first. Пока их байты не участвовали в имени кэша,
+    # правка сцены не меняла ничего: владелец открывал апп и получал НОВЫЙ css поверх
+    # СТАРОГО js, а свежий модуль доезжал только со следующего открытия. Имя кэша
+    # обязано зависеть от всего, что этот кэш держит.
+    files = [BASE / "praxis_static" / name
+             for name in ("app.js", "app.css", "ambient.js",
+                          "memory_views.js", "space3d.js")]
+    key = tuple((str(f), f.stat().st_mtime_ns if f.is_file() else 0) for f in files)
+    if _ASSET_STAMP.get("key") == key:
+        return _ASSET_STAMP["stamp"]
+    digest = hashlib.sha256()
+    for f in files:
+        if f.is_file():
+            digest.update(f.read_bytes())
+    stamp = digest.hexdigest()[:12]
+    _ASSET_STAMP.update(key=key, stamp=stamp)
+    return stamp
+
+
+def _stamped(text: str) -> str:
+    """Проставить текущий отпечаток и в ссылки на ассеты, и в имя кэша оболочки."""
+    stamp = _asset_stamp()
+    text = _VERSION_QUERY.sub(f"?v={stamp}", text)
+    return _SHELL_CACHE_NAME.sub(f"praxis-shell-{stamp}", text)
+
+
 async def serve_praxis_app(request: web.Request):
     path = BASE / "praxisapp.html"
     if path.is_file():
-        return web.FileResponse(path, headers={
+        return web.Response(text=_stamped(path.read_text(encoding="utf-8")),
+                            content_type="text/html", headers={
             "Cache-Control": "no-store",
             "Content-Security-Policy": (
                 "default-src 'self'; script-src 'self' https://telegram.org; "
@@ -383,7 +426,7 @@ async def serve_praxis_app_px(request: web.Request):
         return web.Response(text="praxisapp.html not found", status=500)
     html = path.read_text(encoding="utf-8")
     html = html.replace("/app/static/", "/px/static/")
-    html = html.replace("?v=31", "?v=32")
+    html = _stamped(html)  # третья копия номера версии жила здесь
     # манифест держим на своём JSON-роуте (правильный scope), не на статике
     html = html.replace("/px/static/manifest.webmanifest", "/px/manifest.webmanifest")
     return web.Response(text=html, content_type="text/html", headers={
@@ -493,6 +536,10 @@ async def serve_praxis_static(request: web.Request):
     }
     if name == "sw.js":
         headers["Service-Worker-Allowed"] = "/app"
+        # Отпечаток проставляется и в прекэш-список, и в имя кэша: смена ассетов
+        # обязана менять имя, иначе activate не снесёт прежние версии.
+        return web.Response(text=_stamped(path.read_text(encoding="utf-8")),
+                            content_type="text/javascript", headers=headers)
     response = web.FileResponse(path, headers=headers)
     response.content_type = content_types[name]
     return response
@@ -1420,9 +1467,6 @@ async def api_panel_restart(request: web.Request):
 def make_app() -> web.Application:
     app = web.Application(client_max_size=PWA_FILE_MAX_BYTES + 1024 * 1024)
     app.add_routes([
-        web.get("/", serve_app),
-        web.get("/api/inbox", api_inbox),
-        web.get("/api/letter/{hash}", api_letter),
         web.post("/api/compose/{hash}", api_compose),
         web.post("/api/approve/{hash}", api_approve),
         web.post("/api/reject/{hash}", api_reject),
@@ -1510,60 +1554,37 @@ def make_app() -> web.Application:
 
 
 # --------------------------------------------------------------------------- #
-#  Бот: menu-button открывает mini-app; пуш на новое письмо
+#  Headless-бот: почта, карточки изменений и нативный контактный flow
 # --------------------------------------------------------------------------- #
 
 PENDING_NOTE: dict[int, dict] = {}  # owner_id -> {"slug":…, "name":…} — ждём досье следующим сообщением
 
 
 def _reply_kb() -> ReplyKeyboardMarkup:
-    """Постоянная клавиатура: приложение Praxis + нативный выбор важного из контактов (механика бота)."""
+    """Постоянная клавиатура без WebApp: только нативный выбор важного из контактов."""
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[
-        KeyboardButton(text="Praxis", web_app=WebAppInfo(url=PRAXIS_APP_URL)),
         KeyboardButton(text="👥 Добавить важного", request_users=KeyboardButtonRequestUsers(
             request_id=42, user_is_bot=False, max_quantity=1, request_name=True, request_username=True)),
     ]])
 
 
-def _open_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Praxis", web_app=WebAppInfo(url=PRAXIS_APP_URL))],
-    ])
-
-
 @dp.message(CommandStart())
 async def on_start(message: Message) -> None:
     if OWNER_ID and message.from_user and message.from_user.id != OWNER_ID:
-        viewer = _praxis_service().viewer(message.from_user.id)
-        if viewer is not None and viewer.role == "trusted":
-            scopes = ", ".join(viewer.scopes)
-            await message.answer(
-                "Привет! Егор открыл тебе точные возможности Praxis: " + scopes + ". "
-                "Передавать этот доступ или добавлять других людей нельзя.",
-                reply_markup=ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[
-                    KeyboardButton(text="Praxis", web_app=WebAppInfo(url=PRAXIS_APP_URL))]]))
-            return
-        if message.from_user.id in panel.guest_ids():
-            await message.answer(
-                "Тебе оставлен прежний read-only пульт Praxis.",
-                reply_markup=ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[
-                    KeyboardButton(text="Praxis", web_app=WebAppInfo(url=PANEL_URL))]]))
-            return
-        await message.answer("Это пульт Praxis — он не для тебя.")
+        await message.answer("Это служебный бот Praxis — он не для тебя.")
         return
     await message.answer(
-        "Пульт Praxis. Кнопка «Praxis» — приложение; «👥 Добавить важного» — выбор из твоих "
-        "контактов (после выбора расскажи про человека — запишу ей в память; /skip — без досье).",
+        "Служебный бот Praxis: присылаю новые письма и информацию о её изменениях. "
+        "«👥 Добавить важного» — выбор из твоих контактов; после выбора расскажи про человека "
+        "пару слов, либо /skip.",
         reply_markup=_reply_kb())
-    await message.answer("Разделы:", reply_markup=_open_kb())
 
 
 @dp.message(Command("panel"))
 async def on_panel(message: Message) -> None:
     if OWNER_ID and message.from_user and message.from_user.id != OWNER_ID:
         return
-    await message.answer("Praxis:", reply_markup=InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Открыть", web_app=WebAppInfo(url=PRAXIS_APP_URL))]]))
+    await message.answer("Веб-пульт Praxis удалён. Этот бот работает только с почтой и уведомлениями.")
 
 
 @dp.message(F.users_shared)
@@ -1783,11 +1804,10 @@ async def _poll(bot: Bot) -> None:
                     await bot.send_message(
                         OWNER_ID,
                         f"📬 Новое письмо `{e['hash']}`\nОт: {e['from']}\nТема: {e['subject']}\n\n{body}",
-                        reply_markup=_open_kb(),
                     )
                 except Exception:
                     # напр. «chat not found» — Егор ещё не нажал Start у бота. Письмо уже в ящике,
-                    # он увидит его в mini-app; не роняем уведомления по остальным письмам пачки.
+                    # не роняем уведомления по остальным письмам пачки.
                     log.warning("уведомление по %s не ушло (нажал ли Егор Start у бота?)", e.get("hash"))
             if added:
                 log.info("poll: новых писем %d", len(added))
@@ -1805,16 +1825,13 @@ async def main() -> None:
         log.warning("почта не настроена (нет PRAXIS_EMAIL_*) — поллинг вхолостую")
     bot = Bot(TOKEN)
     me = await bot.get_me()
-    log.info("mailbot @%s на связи; mini-app=%s порт=%d поллинг=%.0fs", me.username, WEBAPP_URL, PORT, POLL_SEC)
+    log.info("headless mailbot @%s на связи; IMAP-поллинг=%.0fs; HTTP выключен", me.username, POLL_SEC)
     try:
-        await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="Praxis",
-                                                                    web_app=WebAppInfo(url=PRAXIS_APP_URL)))
+        # Сбрасываем ранее установленную WebApp-кнопку и не даём ей воскреснуть после рестарта.
+        await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+        log.info("Telegram WebApp menu button очищена")
     except Exception:
-        log.warning("set_chat_menu_button не удалось (несекретно, продолжаю)", exc_info=True)
-    runner = web.AppRunner(make_app())
-    await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", PORT).start()
-    log.info("mini-app слушает на 0.0.0.0:%d (за Caddy)", PORT)
+        log.warning("set_chat_menu_button(default) не удалось (продолжаю)", exc_info=True)
     asyncio.create_task(_poll(bot))
     asyncio.create_task(_watch_proposals(bot))
     asyncio.create_task(_watch_restart_signal(bot))

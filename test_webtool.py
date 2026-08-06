@@ -110,12 +110,26 @@ class TestSSRF(EnvBase):
         self.assertIn("SSRF", out)
 
     def test_render_target_still_guarded(self):
+        """⚠ Прежний фейк getaddrinfo отдавал 127.0.0.1 на ЛЮБОЕ имя — включая сам
+        рендерер. Поэтому оба ассерта были зелены и с рельсом, и без него: без него
+        запрос уходил на рендерер, и на приватный адрес спотыкался УЖЕ ОН, выдавая
+        то же «[не открылось] … SSRF-рельс». Различающая часть — ЧЬЁ имя отклонено —
+        не проверялась вовсе. Резолвер теперь маршрутизирующий, и проверяется цель.
+        """
         import socket
-        self._patch(socket, getaddrinfo=lambda h, p: [(2, 1, 6, "", ("127.0.0.1", 0))])
+
+        def gai(h, p):
+            addr = "93.184.216.34" if h == "r.jina.ai" else "127.0.0.1"
+            return [(2, 1, 6, "", (addr, 0))]
+
+        self._patch(socket, getaddrinfo=gai)
         self._patch(webtool, RENDER_URL="https://r.jina.ai/")
+        self._patch(webtool, _fetch_raw=lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("фетч через рендерер не должен состояться")))
         out = webtool.web_read("http://internal.lan/secret", render=True)
         self.assertIn("[не открылось]", out)
-        self.assertIn("SSRF", out)
+        self.assertIn("internal.lan", out, "отклонена должна быть ЦЕЛЬ, а не рендерер")
+        self.assertNotIn("r.jina.ai", out, "до рендерера дело дойти не должно")
 
     def test_peer_guard_rejects_private_peer(self):
         # имя резолвится в публичный (check проходит), но фактический peer — 127.0.0.1
@@ -250,13 +264,17 @@ class TestFetchRaw(EnvBase):
         self.assertIn("DNS-rebind", str(ctx.exception))
 
     def test_happy_path_and_body_cap(self):
-        big = b"x" * (webtool.MAX_BYTES + 50_000)
+        # ⚠ Было `MAX_BYTES + 50_000` = 950 000 при допуске ассерта 965 536: вход
+        # МЕНЬШЕ допуска, так что обрезка недоказуема — без потолка тело качалось
+        # целиком и всё равно проходило. Берём вдвое больше и проверяем НЕДОКАЧКУ.
+        big = b"x" * (webtool.MAX_BYTES * 2)
         def responder(url):
             return _FakeResp(200, {"content-type": "text/plain"}, big, peer="93.184.216.34")
         self._install(responder, {"pub.example": "93.184.216.34"})
         final, body, ctype = webtool._fetch_raw("http://pub.example/")
         self.assertEqual(final, "http://pub.example/")
-        self.assertLessEqual(len(body), webtool.MAX_BYTES + 65536, "тело обрезано у потолка")
+        self.assertLess(len(body), len(big), "поток оборван у потолка, тело не докачано")
+        self.assertLessEqual(len(body), webtool.MAX_BYTES + 65536, "обрыв у самого потолка")
         self.assertIn("text/plain", ctype)
 
     def test_pdf_cap_escalated(self):
@@ -265,7 +283,11 @@ class TestFetchRaw(EnvBase):
             return _FakeResp(200, {"content-type": "application/pdf"}, pdf, peer="93.184.216.34")
         self._install(responder, {"pub.example": "93.184.216.34"})
         _final, body, _ctype = webtool._fetch_raw("http://pub.example/doc.pdf")
-        self.assertGreater(len(body), webtool.MAX_BYTES, "для PDF потолок поднят выше MAX_BYTES")
+        # ⚠ Было сравнение с MAX_BYTES (900 000), а неэскалированная ветка даёт
+        # 917 504 — последний чанк перелетает потолок. Обе ветки проходили. Сравниваем
+        # с ПОЛНОЙ длиной: целиком тело приходит только при поднятом потолке.
+        self.assertEqual(len(body), len(pdf),
+                         "PDF скачан целиком — потолок поднят до PDF_MAX_BYTES")
 
 
 class TestDecode(EnvBase):

@@ -53,6 +53,9 @@ TOOL_OUTCOME_KINDS = frozenset({
     "tool_result", "tool_completed", "tool_failed", "tool_reconciled",
 })
 TOOL_RESOLUTION_OUTCOMES = frozenset({"completed", "failed", "not_applied"})
+# Сколько смен статуса подряд в хвосте журнала считаем качелями «recover -> resume -> recover».
+# Три полных оборота: одиночный рестарт даёт одну-две смены, а не шесть.
+RECOVERY_FLAP_LIMIT = int(os.getenv("PRAXIS_RECOVERY_FLAP_LIMIT", "6") or 6)
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
 _TRANSITIONS = {
     "pending": frozenset({"running", "cancelled", "failed"}),
@@ -469,6 +472,18 @@ class RunManager:
         if not isinstance(context, RunContext):
             raise TypeError("context must be RunContext")
         run_id = self._validate_id(context.run_id)
+        # Расписка о деградации записи снимка едет ВМЕСТЕ с документом (подкласс str
+        # из run_snapshot), поэтому читается ДО str(...) ниже — приведение к обычной
+        # строке её срежет. Так расписка потокобезопасна и не стоит agent.py ни строки.
+        receipt = getattr(context_markdown, "receipt", None)
+        context_payload = str(context_markdown or "").encode("utf-8")
+        # ⚠ Пояса по размеру здесь НЕТ, и это то же решение, что в run_snapshot: потолок
+        # записи вынесен из этого релиза целиком (Praxis, 05.08 — «требует измерения в
+        # байтах, а не в символах… не должен третий раз задерживать формат»). Дефект
+        # настоящий: читатель отказывает на 16 МиБ (agent.py:9612), а сюда пишется что
+        # дали, и ход остаётся невозобновимым МОЛЧА. Но отказ на этом шве делает её
+        # немой прямо на ходе, и выбирать между молчаливой потерей и немотой надо не
+        # заплаткой на полях чужого релиза, а отдельным заходом со своей адверсаркой.
         created_at = context.created_at or _utc_now()
         run_dir = self.root / self._month(created_at) / run_id
         _ensure_dir(run_dir.parent)
@@ -480,7 +495,6 @@ class RunManager:
         _ensure_dir(run_dir / "results")
         _ensure_dir(run_dir / "artifacts")
         context_path = run_dir / "context.md"
-        context_payload = str(context_markdown or "").encode("utf-8")
         _atomic_bytes(context_path, context_payload)
         # Create the append target eagerly so its permissions do not depend on process umask.
         _atomic_bytes(run_dir / "events.jsonl", b"")
@@ -519,6 +533,14 @@ class RunManager:
             run_id, "run_created", status="pending",
             context_snapshot=dict(manifest["context_snapshot_ref"]),
         )
+        if isinstance(receipt, dict) and receipt:
+            # Второй носитель расписки. Первый — сам снимок (расписка лежит в блоке
+            # власти, под его же sha256, и видна её глазами); третий — счётчик в
+            # run_snapshot.COUNTERS. Штатный успех сюда не попадает.
+            self.append_event(run_id, "context_snapshot_degraded",
+                              degraded=receipt.get("degraded"),
+                              snapshot_format=receipt.get("format"),
+                              receipt=dict(receipt))
         return persisted_context
 
     def path(self, run_id: str) -> Path:
@@ -1983,6 +2005,24 @@ class RunManager:
                     except OSError:
                         pass
 
+    def _trailing_status_flips_locked(self, run_dir: Path) -> int:
+        """Сколько событий подряд в ХВОСТЕ журнала — только смены статуса.
+
+        Подпись качелей. `recover()` уводит `running` в `paused`, резюмер возвращает
+        обратно, и так по кругу: работы нет, а журнал растёт двумя событиями за оборот.
+        04.08 один ход отвечал человеку в комнате и провёл так четыре с половиной часа —
+        230 оборотов, 460 из 479 событий. Ни счётчика, ни эскалации, ни жалобы: снаружи
+        это выглядело как «ход идёт».
+        """
+        flips = 0
+        for row in self._iter_events_reverse(run_dir):
+            if row.get("kind") != "status_changed":
+                break
+            flips += 1
+            if flips >= RECOVERY_FLAP_LIMIT:
+                break
+        return flips
+
     def recover(self) -> list[dict]:
         """Recover interrupted manifests without replaying an uncertain side effect."""
         reports: list[dict] = []
@@ -2002,16 +2042,44 @@ class RunManager:
                         call_id for call_id, row in outstanding.items()
                         if row.get("side_effect") is not False and row.get("idempotent") is not True
                     ]
-                    target = "in_doubt" if uncertain else "paused"
-                    reason = ("process restarted with an unobserved side effect"
-                              if uncertain else "process restarted; no uncertain side effect observed")
+                    with self._locked(run_dir):
+                        flips = self._trailing_status_flips_locked(run_dir)
+                    # Качели объявляются, только если ИМИ и решён исход. Неопределённый
+                    # побочный эффект — своя причина и своя дорога (resolve_in_doubt по
+                    # уликам), и подписывать её словом «качели» значит сбить того, кто
+                    # потом будет разбирать: он пойдёт искать петлю вместо расписки.
+                    flapping = (bool(outstanding) and not uncertain
+                                and flips >= RECOVERY_FLAP_LIMIT)
+                    if uncertain:
+                        target = "in_doubt"
+                        reason = "process restarted with an unobserved side effect"
+                    elif flapping:
+                        # Выход из петли. `in_doubt` выбран не за строгость, а потому что это
+                        # ЕДИНСТВЕННЫЙ статус, из которого нельзя уйти обычным переходом:
+                        # `transition` требует `resolve_in_doubt`. `paused` резюмер поднял бы
+                        # снова, `blocked` тоже остаётся кандидатом на возобновление. И это
+                        # честное имя происходящего: исход висящего вызова НЕИЗВЕСТЕН —
+                        # остановить уже идущий инструмент нельзя, статус хода ему не указ.
+                        target = "in_doubt"
+                        reason = ("recovery and resume kept flipping this run without any "
+                                  "progress; its outstanding calls need explicit reconciliation")
+                    else:
+                        target = "paused"
+                        reason = "process restarted; no uncertain side effect observed"
                     recovered = self.transition(
                         run_id, target, expected="running", reason=reason,
                         details={"outstanding_call_ids": sorted(outstanding),
-                                 "uncertain_call_ids": sorted(uncertain)},
+                                 "uncertain_call_ids": sorted(uncertain),
+                                 "trailing_status_flips": flips},
                     )
-                    reports.append({"run_id": run_id, "from": "running", "to": target,
-                                    "revision": recovered.get("revision")})
+                    report = {"run_id": run_id, "from": "running", "to": target,
+                              "revision": recovered.get("revision")}
+                    if flapping:
+                        # В журнал попадает именно это слово: «качели», а не очередное
+                        # рутинное «recovery». Иначе двести тридцатый оборот выглядит как первый.
+                        report["flapping"] = flips
+                        report["outstanding_call_ids"] = sorted(outstanding)
+                    reports.append(report)
                     manifest = recovered
                 recap = manifest.get("recap") or {}
                 promotion = recap.get("promotion") or {}

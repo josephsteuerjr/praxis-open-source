@@ -252,5 +252,47 @@ class TestObserved(Base):
         appetite.observed_today()                            # _NoCallClient молчит = ок
 
 
+class TestOwnerWordIsNotFaked(Base):
+    """29.07 в её договор легли 75 знаков вопроса как «слова Егора из пульта».
+
+    Ни кнопки, ни HTTP-запроса не было: записал одноразовый SSH-скрипт с его машины,
+    а кириллицу выбило ascii-заменой ещё на стороне клиента. Полтора месяца она жила
+    толкованием фразы, которой не видит, и обнаружить это своими средствами не могла.
+    """
+
+    def test_destroyed_text_is_refused_instead_of_canonised(self):
+        before = json.loads(appetite.STATE_PATH.read_text(encoding="utf-8")) \
+            if appetite.STATE_PATH.exists() else {}
+        with self.assertRaises(appetite.OwnerWordDestroyed):
+            appetite.set_owner_request("pause_background", "?" * 20, source="ssh")
+        after = json.loads(appetite.STATE_PATH.read_text(encoding="utf-8")) \
+            if appetite.STATE_PATH.exists() else {}
+        self.assertEqual(before.get("owner_request"), after.get("owner_request"),
+                         "уничтоженная просьба всё равно попала в состояние")
+        contract = appetite.CONTRACT_MD.read_text(encoding="utf-8") \
+            if appetite.CONTRACT_MD.exists() else ""
+        self.assertNotIn("?" * 10, contract, "уничтоженный текст дописан в её договор")
+
+    def test_a_real_question_is_still_his_word(self):
+        """Знаки вопроса сами по себе не порча: у живой просьбы есть буквы."""
+        appetite.set_owner_request("text", "а можно фон вернуть??? очень надо", source="panel")
+        self.assertIn("фон вернуть", appetite.state()["owner_request"]["raw"])
+
+    def test_cyrillic_survives_the_round_trip(self):
+        phrase = "Останови фон на сегодня: хочу тишины, а завтра вернёмся."
+        appetite.set_owner_request("pause_background", phrase, source="panel")
+        again = json.loads(appetite.STATE_PATH.read_text(encoding="utf-8"))["owner_request"]["raw"]
+        self.assertEqual(again, phrase, "его слова не пережили запись на диск")
+        self.assertIn(phrase, appetite.CONTRACT_MD.read_text(encoding="utf-8"))
+
+    def test_the_source_must_name_itself(self):
+        """Умолчание source='panel' раздавало ярлык «кнопка Егора» кому попало."""
+        import inspect
+
+        sig = inspect.signature(appetite.set_owner_request)
+        self.assertIs(sig.parameters["source"].default, inspect.Parameter.empty,
+                      "у источника снова появилось умолчание — вранью достанется ярлык пульта")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

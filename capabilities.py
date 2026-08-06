@@ -334,10 +334,11 @@ def _human_only_line(snap: dict | None = None) -> str:
     """Что из owner-набора НЕ моё: доверие человеку и раздача доступа к его ПК.
 
     ⚠ Первая редакция читала `agent._HUMAN_OWNER_ONLY_TOOL_NAMES` — и была права только
-    наполовину: под mail-гейтом у owner есть ещё и `send_email`, которого в этом frozenset
-    нет. Считаем РАЗНИЦЕЙ двух наборов, снятых кодом в том же снимке: тогда строка не может
-    разойтись со списком, напечатанным строкой выше, — а именно так 26.07 и вышло со
-    скобкой «owner-тулы в личке».
+    наполовину: под mail-гейтом у owner был ещё и `send_email`, которого в этом frozenset
+    нет. 03.08.2026 само расхождение снято решением Егора (send_email стал общей рукой),
+    но правило остаётся в силе: считаем РАЗНИЦЕЙ двух наборов, снятых кодом в одном
+    снимке. Копия объявленного множества однажды снова разойдётся с поведением —
+    разница не может.
     """
     s = snap if snap is not None else snapshot()
     tools = s.get("tools") or {}
@@ -501,11 +502,12 @@ def snapshot() -> dict:
     except Exception:
         gated["mail"] = False
     if gated["mail"]:
-        # Читать почту и готовить черновик — её работа в любом ходе (agent.py:10315);
-        # отправка наружу остаётся отдельным owner-действием, поэтому send_email — только
-        # в owner-наборе. Разбивка ровно та же, что раздаёт руки в ходе.
-        owner_tools = owner_tools + ["send_email", "mail_read", "mail_draft_reply"]
-        self_tools = self_tools + ["mail_read", "mail_draft_reply"]
+        # 03.08.2026 (решение Егора, вариант «а»): send_email больше не owner-эксклюзив.
+        # Разбивка ровно та же, что раздаёт руки в ходе (agent.py, mail-гейт), — и это
+        # обязано оставаться так: снимок описывает раздачу, а не повторяет её по памяти.
+        mail_hands = ["send_email", "mail_read", "mail_draft_reply"]
+        owner_tools = owner_tools + mail_hands
+        self_tools = self_tools + mail_hands
     lim = llm.limits()
     snap = {
         "tools": {"base": base_tools, "owner": sorted(set(owner_tools)),
@@ -587,7 +589,6 @@ def snapshot() -> dict:
                           "решение открыть его моё"),
             "llm_json": "ключи мозга (memory/llm.json) — только пульт; но МОДЕЛИ по ролям "
                         "я меняю сама (switch_brain, PASS 22) — каталог и наблюдения без ключей",
-            "mail_send": "письма наружу уходят только по approve Егора (mailroom)",
         },
     }
     _CACHE.update(fp=fp, snap=snap)
@@ -655,7 +656,7 @@ def describe(scope: str = "owner", *, offered: list[str] | None = None) -> str:
             f"способность): {_human_only_line(s)}\n"
             f"- гейты: веб-поиск {'вкл (' + str(g.get('web_search_backend')) + ')' if g['web_search'] else 'выкл'}, "
             f"веб-руки (web_read/web_find, любой мозг) {'вкл' if g.get('web_hands') else 'выкл'}, "
-            f"почта {'настроена (черновики; отправка по approve)' if g['mail'] else 'не настроена'}\n"
+            f"почта {'настроена (читаю, черновлю и отправляю сама)' if g['mail'] else 'не настроена'}\n"
             "- группы: членство сразу даёт контекст; reflective-проход может быть адресным или инициативным\n"
             f"- темп и контекст: кулдаун dm {lim['cooldown_dm_sec']:.0f}с / группа {lim['cooldown_group_sec']:.0f}с "
             "(мои живые рычаги — manage_perception, вместе с опциональным порогом ACK-шума); "
@@ -688,7 +689,7 @@ def describe(scope: str = "owner", *, offered: list[str] | None = None) -> str:
             "версия+причина+откат, Егор видит постфактум; журнал событий нагрузки и ночная ревизия "
             "характера по прожитому; меняющие действия — из owner-скоупа (моя дисциплина)\n"
             f"- пульт Егора: {', '.join(s['panel']) or 'разделы не прочитались (это «не знаю»)'}\n"
-            f"- закрыто и почему: {s['closed']['llm_json']}; {s['closed']['mail_send']}"
+            f"- закрыто и почему: {s['closed']['llm_json']}"
             + (f"\n- {rails_line}" if (rails_line := rails.state_line()) else "")
         )
     # Публичные каналы: честно о доступной поверхности, без ключей/мозга/панели.

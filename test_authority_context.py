@@ -166,11 +166,13 @@ class AuthorityContextTests(unittest.TestCase):
         self.assertTrue(inbound_mail_tools <= offered[0])
         self.assertIn("send_email", offered[0])
         self.assertTrue(inbound_mail_tools <= offered[1])
-        self.assertNotIn("send_email", offered[1])
-        # Решение Егора 26.07: читать письмо и готовить черновик — её работа в любом
-        # ходе. Отправка наружу остаётся отдельным owner-действием (mailroom approval).
+        self.assertIn("send_email", offered[1])
+        # Решение Егора 26.07: набор рук не зависит от того, кто заговорил. 03.08.2026
+        # оно распространено и на почту (вариант «а»): отправка наружу перестала быть
+        # owner-действием — прежде mail-гейт молча заводил owner-эксклюзив мимо
+        # `_HUMAN_OWNER_ONLY_TOOL_NAMES`, и объявленное расходилось с поведением.
         self.assertTrue(inbound_mail_tools <= offered[2])
-        self.assertNotIn("send_email", offered[2])
+        self.assertIn("send_email", offered[2])
 
     def test_room_mutations_preserve_owner_vs_self_and_legacy_goals_are_absent(self):
         mode_calls = []

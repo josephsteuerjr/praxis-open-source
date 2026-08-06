@@ -1268,6 +1268,52 @@ select {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .07);
 }
 
+/* Сводка над списком прогонов: числа истории + фраза о границе среза (03.08.2026). */
+.runs-summary {
+  margin-bottom: 11px;
+  padding: 13px 14px;
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-md);
+}
+
+.runs-summary__metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(58px, 1fr));
+  gap: 6px;
+}
+
+.runs-summary__metrics span {
+  min-width: 0;
+  padding: 7px;
+  display: grid;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .04);
+  text-align: center;
+}
+
+.runs-summary__metrics strong {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  /* Пять чисел стоят в ряд и меняются на каждом снимке: пропорциональные цифры дают
+     дёрганье ширины колонок. tabular-nums держит 2120 и 1990 в одной сетке. */
+  font-variant-numeric: tabular-nums;
+}
+
+.runs-summary__metrics small {
+  color: var(--muted);
+  font-size: 8.5px;
+  text-transform: uppercase;
+}
+
+.runs-summary__note {
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
 .stack-list {
   display: grid;
   gap: 9px;
@@ -1737,15 +1783,11 @@ select {
   font-size: 9.5px;
 }
 
-.map-card .map-count {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  color: var(--muted);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
-
+/* ⚠ 03.08.2026. Здесь стояло правило для счётчика на карточке карты. Оно было
+   мёртвым дважды: поля count в снимке нет вовсе (praxis_app отдаёт available/updated_at/
+   bytes), а position: absolute отсчитывался бы не от карточки — ни .map-card, ни
+   .map-grid не позиционированы, так что счётчик уехал бы к первому позиционированному
+   предку. Убрано вместе с веткой в mapCard. */
 .domain-section + .domain-section {
   margin-top: 31px;
 }
@@ -2148,6 +2190,120 @@ fieldset.field {
   resize: vertical;
 }
 
+/* ⚠ 03.08.2026. Карты её памяти показываются здесь, а НЕ в .recap-copy ниже: у той
+   коробки свой max-height: min(48vh, 520px), и внутри листа, который сам скроллится,
+   это давало вложенную прокрутку — 35 КБ RUNS.md в окошке высотой в пол-экрана. У
+   .md-doc собственной высоты НЕТ намеренно: скроллер один на лист, .sheet__body.
+   ⚠ Вторая ловушка рядом: переменная --mono не объявлена в этом файле НИГДЕ, поэтому
+   `font: 11px/1.55 var(--mono)` у .recap-copy невалиден при вычислении и целиком
+   отбрасывается — вместе с размером и межстрочником. Здесь свойства заданы поштучно,
+   чтобы вид карты не зависел от переменной-призрака. */
+.md-doc {
+  color: var(--text-soft);
+  font-size: 13.5px;
+  line-height: 1.62;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.md-facts,
+.md-notice {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
+.md-notice {
+  padding: 8px 10px;
+  color: var(--gold);
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  background: rgba(var(--gold-rgb), .08);
+}
+
+.md-doc .md-h {
+  margin: 18px 0 7px;
+  color: var(--text);
+  font-size: 14px;
+  letter-spacing: -.01em;
+}
+
+.md-doc .md-h:first-child {
+  margin-top: 0;
+}
+
+.md-doc h4.md-h {
+  color: var(--text-soft);
+  font-size: 12.5px;
+}
+
+.md-doc .md-p {
+  margin: 0 0 10px;
+}
+
+.md-doc .md-quote {
+  margin: 0 0 12px;
+  padding: 2px 0 2px 12px;
+  color: var(--muted);
+  border-left: 2px solid var(--stroke);
+}
+
+.md-doc .md-list {
+  margin: 0 0 12px;
+  padding-left: 18px;
+}
+
+.md-doc .md-li {
+  margin: 0 0 5px;
+}
+
+.md-doc .md-li--nested {
+  margin-left: 14px;
+  color: var(--muted);
+}
+
+.md-doc .md-code,
+.md-doc .md-pre {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+}
+
+.md-doc .md-code {
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .06);
+}
+
+.md-doc .md-pre {
+  margin: 0 0 12px;
+  padding: 11px 12px;
+  overflow-x: auto;
+  white-space: pre;
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  background: rgba(4, 7, 14, .28);
+}
+
+/* Внутренняя цель («../people/егор.md») — не ссылка: открыть этот файл аппу пока
+   нечем, и подчёркнутая ссылка обещала бы переход, которого нет. Адрес стоит рядом
+   приглушённым — чтобы владелец видел, ГДЕ это лежит, и мог спросить у неё. */
+.md-doc .md-link {
+  color: var(--text);
+}
+
+.md-doc .md-link__target {
+  margin-left: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.md-doc .md-link--web {
+  color: var(--gold);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .recap-copy {
   max-height: min(48vh, 520px);
   margin: 0;
@@ -2460,6 +2616,16 @@ fieldset.field {
   margin: 0 2px;
 }
 
+/* ⚠ Шапка — flex со space-between. Вторая кнопка, положенная в неё напрямую,
+   развела бы заголовок и кнопки по краям и разъехалась бы вёрстка: кнопки
+   обязаны жить в одной обойме. */
+.mem-block__tools {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .mem-block__copy {
   min-width: 0;
   display: grid;
@@ -2525,6 +2691,8 @@ fieldset.field {
 /* ── созвездие ───────────────────────────────────────────────────── */
 
 .mem-stage {
+  /* сцена не тянет за собой прокрутку соседей */
+  overscroll-behavior: contain;
   position: relative;
   height: var(--mem-stage-h);
   overflow: hidden;
@@ -2546,10 +2714,18 @@ fieldset.field {
   width: 100%;
   height: 100%;
   cursor: grab;
-  /* pan-y, а не none: вертикальный свайп по сцене обязан прокручивать раздел
-     «Память», иначе полоса в 320–420 px съедает главный жест телефона.
-     Панораму одним пальцем модуль берёт только на горизонтальном жесте,
-     pinch (два пальца) и «В центр» остаются на месте. */
+  /* ⚠ 03.08.2026, вторая правка за день. Утром здесь `pan-y` заменили на `none`:
+     «двигаешь 3D, а едет страница». Переворот оказался хуже, чем описан в его же
+     комментарии. JS-гейт в space3d.js и memory_views.js остался прежним и
+     по-прежнему БРОСАЛ вертикальную протяжку пальцем, рассчитывая, что её подберёт
+     страница. Подбирать стало некому — и вертикальный свайп по сцене перестал
+     делать вообще что-либо: ни прокрутки раздела, ни наклона камеры.
+
+     Размен снят целиком, а не отыгран назад. Свёрнутая сцена — полоса в 286–420 px
+     внутри прокручиваемой ленты, вертикаль там принадлежит странице. Все жесты
+     сцена забирает только развёрнутой (.stage-full ниже): там она занимает экран
+     целиком, и отбирать больше не у кого. Развернуть — кнопка «Развернуть» в шапке
+     блока или короткий тап по пустому месту холста. */
   touch-action: pan-y;
   outline: none;
 }
@@ -2707,6 +2883,70 @@ fieldset.field {
 
 .mem-chip--ghost:hover {
   background: var(--mem-ink);
+}
+
+/* ── полноэкранная сцена ─────────────────────────────────────────────
+   ⚠ 03.08.2026. Блок стоит ЗДЕСЬ, а не рядом с .mem-stage, и это не вкусовщина:
+   `.stage-full__exit` носит и класс `.mem-chip--ghost` (min-height: 34px,
+   background: transparent). При равной специфичности выигрывает то, что ниже, —
+   выше по файлу наши 44px и подложка были бы молча перебиты.
+
+   Сам слой нельзя было сделать классом на .mem-stage: секция `.view` держит
+   `transform` и `will-change: transform`, а трансформированный предок становится
+   containing block даже для `position: fixed` — сцена легла бы внутрь секции и
+   была бы обрезана её overflow. Поэтому .mem-stage физически переезжает в
+   #stageFullscreen (внутри #app, вне `.view`), а в ленте остаётся распорка. */
+.stage-full {
+  position: fixed;
+  inset: 0;
+  /* выше топбара (30) и дока (32), ниже scrim (60) и шторки (61): слой перекрывает
+     навигацию — значит выход из него только «Свернуть», Escape и BackButton, —
+     но досье узла обязано открываться НАД ним */
+  z-index: 50;
+  display: flex;
+  padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+  background:
+    radial-gradient(circle at 22% 10%, rgba(var(--violet-rgb), .1), transparent 55%),
+    var(--bg-deep);
+}
+
+/* display: flex перебивает атрибут hidden — без этой строки слой висел бы всегда */
+.stage-full[hidden] {
+  display: none;
+}
+
+.stage-full .mem-stage {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+}
+
+/* развёрнутой сцене вертикаль отдавать некому — все жесты её */
+.stage-full .mem-canvas {
+  touch-action: none;
+}
+
+.stage-full__exit {
+  position: absolute;
+  z-index: 2;
+  top: calc(var(--safe-top) + 12px);
+  right: calc(var(--safe-right) + 12px);
+  min-height: 44px;                 /* палец, а не курсор: 34px у ghost-чипа мало */
+  color: var(--text);
+  background: var(--surface-strong);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+
+/* Распорка на месте уехавшей сцены. Без неё лента схлопывается на высоту сцены,
+   прокрутка уезжает — и после сворачивания владелец оказывается не там, где был. */
+.mem-stage-slot {
+  height: var(--mem-stage-h);
+  border: 1px dashed var(--mem-dash);
+  border-radius: var(--radius-lg);
 }
 
 /* ── дендрограмма ────────────────────────────────────────────────── */

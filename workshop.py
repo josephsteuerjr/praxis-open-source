@@ -33,6 +33,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import hands
@@ -54,7 +55,20 @@ PIP_TIMEOUT = 300
 RUN_OUT_CAP = 8000          # потолок вывода run/pip (голова+хвост)
 READ_CAP_LINES = 400        # потолок fs_read за раз
 SEARCH_CAP = 60             # строк-совпадений fs_search
+# 04.08: потолки ОБХОДА, а не только попаданий. fs_search("10 млн", glob="**/*",
+# root="/app/memory") не вернулся 4.5 часа: SEARCH_CAP ограничивает совпадения, а обход
+# дерева не ограничивал никто. Ход держал целое ядро, память росла, а прогон качался
+# running<->paused 230 раз. Потолки читаются из окружения — это её рычаги, а не мой забор:
+# 0 в любом из них снимает соответствующий предел совсем.
+SEARCH_SCAN_CAP = int(os.getenv("PRAXIS_SEARCH_SCAN_CAP", "40000") or 0)   # путей за обход
+SEARCH_SECONDS = float(os.getenv("PRAXIS_SEARCH_SECONDS", "45") or 0)      # секунд на поиск
 MAP_CAP = 14000             # символов code_map
+
+# Метасимволы, которые вправду делают строку регуляркой. `re.escape` с Python 3.7 экранирует
+# ещё и ПРОБЕЛ (и `#`, `&`, `~`), поэтому проверка «литерал == re.escape(литерал)» объявляла
+# нелитеральным любой запрос из двух слов — и он проваливался мимо быстрого бинарного пути
+# с его потолками в медленный питоновский обход. Проверяем то, что действительно значимо.
+_REGEX_META = re.compile(r"[\\^$.|?*+()\[\]{}]")
 
 WRITE_ZONES = ("workspace", "soul", "memory")   # как у shell: её дом для записи
 # Совместимость с генератором Rust-пола и старыми тестовыми импортами. После решения
@@ -501,7 +515,7 @@ def fs_search(pattern: str, glob: str = "**/*.py", root: str = "") -> str:
     # 16.3+: чистый литерал (без regex-метасимволов) ищет бинарь — рельсы и расписка его.
     # Его диалект маски: `**/имя` или просто `имя`; поддиректорию в маске оставляем питону.
     mask = glob.replace("**/", "", 1)
-    if (pattern and pattern == re.escape(pattern) and not pattern.startswith("-")
+    if (pattern and not _REGEX_META.search(pattern) and not pattern.startswith("-")
             and "/" not in mask and "\\" not in mask):
         r = hands.search(pattern, glob=glob, root=root or "", cap=SEARCH_CAP, base=BASE)
         if r is not None and r.get("ok"):
@@ -513,8 +527,23 @@ def fs_search(pattern: str, glob: str = "**/*.py", root: str = "") -> str:
     base = _resolve_read(root) if root else BASE
     if base is None or not base.is_dir():
         return "Не ищу: плохой корень поиска."
-    hits, files_seen = [], 0
-    for p in sorted(base.glob(glob)):
+    # Обход ЛЕНИВЫЙ и ограниченный. Прежде здесь стоял `sorted(base.glob(glob))`: он
+    # материализует и сортирует всё дерево ДО первого чтения — на memory с гигабайтами
+    # прогонов это часы и гигабайты ОЗУ ещё до того, как найдётся первое совпадение.
+    # Порядок выдачи сохранён: сортируем НАЙДЕННОЕ, а не всё дерево.
+    found: list[tuple] = []
+    files_seen = scanned = 0
+    stop = ""
+    deadline = (time.monotonic() + SEARCH_SECONDS) if SEARCH_SECONDS > 0 else None
+    for p in base.glob(glob):
+        scanned += 1
+        if SEARCH_SCAN_CAP > 0 and scanned > SEARCH_SCAN_CAP:
+            stop = f"обошла {SEARCH_SCAN_CAP} путей и остановилась"
+            break
+        # Часы спрашиваем не на каждом пути: сам вызов дороже проверки маски.
+        if deadline is not None and not scanned % 256 and time.monotonic() > deadline:
+            stop = f"искала {SEARCH_SECONDS:.0f}с и остановилась"
+            break
         if not p.is_file() or _is_secret(p):
             continue
         if any(part in _SKIP_DIRS for part in p.parts):
@@ -523,13 +552,23 @@ def fs_search(pattern: str, glob: str = "**/*.py", root: str = "") -> str:
         try:
             for i, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
                 if rx.search(line):
-                    rel = p.relative_to(base)
-                    hits.append(f"{rel}:{i}: {line.strip()[:180]}")
-                    if len(hits) >= SEARCH_CAP:
-                        return "\n".join(hits) + f"\n… (потолок {SEARCH_CAP} — сузь паттерн)"
+                    found.append((str(p.relative_to(base)), i, line.strip()[:180]))
         except OSError:
             continue
-    return "\n".join(hits) if hits else f"Ничего не нашла ({files_seen} файлов по {glob})."
+        if len(found) >= SEARCH_CAP:
+            stop = stop or f"потолок {SEARCH_CAP} совпадений"
+            break
+    found.sort(key=lambda row: (row[0], row[1]))
+    hits = [f"{rel}:{i}: {text}" for rel, i, text in found[:SEARCH_CAP]]
+    if not hits:
+        tail = f" — {stop}" if stop else ""
+        return f"Ничего не нашла ({files_seen} файлов по {glob}, путей обошла {scanned}{tail})."
+    if len(found) > SEARCH_CAP:
+        stop = stop or f"потолок {SEARCH_CAP} совпадений"
+    # Усечение НАЗЫВАЕТСЯ. Молчаливое «ничего не нашла» после обрыва обхода — это ложь:
+    # она бы решила, что искомого нет, а мы просто не дошли.
+    return "\n".join(hits) + (f"\n… ({stop}; путей обошла {scanned}, файлов прочла "
+                              f"{files_seen} — сузь маску или корень)" if stop else "")
 
 
 def fs_ls(path: str = "") -> str:
